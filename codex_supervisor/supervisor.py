@@ -314,3 +314,64 @@ class Supervisor:
                 external_tracked_turn_status=turn_status,
             )
             return
+
+        if turn_status == "completed":
+            self.store.update_job(
+                job.id,
+                status=JobStatus.COMPLETE,
+                goal_status="externalComplete",
+                last_error=None,
+                external_tracked_turn_status=turn_status,
+            )
+            self._wake_event.set()
+            return
+        if turn_status == "failed":
+            self.store.update_job(
+                job.id,
+                status=JobStatus.FAILED,
+                goal_status="externalFailed",
+                last_error="The latest Codex Desktop turn failed.",
+                external_tracked_turn_status=turn_status,
+            )
+            self._wake_event.set()
+            return
+        if turn_status == "interrupted":
+            self.store.update_job(
+                job.id,
+                status=JobStatus.READY_OWNER,
+                goal_status="externalReady",
+                last_error="The Desktop turn was interrupted; ready to continue through the existing owner.",
+                external_baseline_turn_id=turn_id,
+                external_tracked_turn_id=None,
+                external_tracked_turn_status=turn_status,
+            )
+            self._wake_event.set()
+
+    async def _advance_managed_job(self, job: Job) -> None:
+        try:
+            if job.thread_id is None:
+                try:
+                    resolved_cwd = self.store.resolve_job_cwd(job)
+                except ValueError as exc:
+                    self.store.update_job(job.id, status=JobStatus.BLOCKED, last_error=str(exc))
+                    return
+                if not resolved_cwd.is_dir():
+                    self.store.update_job(
+                        job.id,
+                        status=JobStatus.BLOCKED,
+                        last_error=f"Working directory does not exist: {resolved_cwd}",
+                    )
+                    return
+                self.store.update_job(job.id, cwd=str(resolved_cwd))
+                thread_id = await self.app_server.start_thread(
+                    cwd=str(resolved_cwd),
+                    approval_policy=self.config.approval_policy,
+                    approvals_reviewer=self.config.approvals_reviewer,
+                    sandbox=self.config.sandbox,
+                )
+                self.store.update_job(
+                    job.id,
+                    status=JobStatus.ACTIVE,
+                    thread_id=thread_id,
+                    goal_status=GoalStatus.ACTIVE.value,
+                    last_error=None,
