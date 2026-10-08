@@ -358,3 +358,93 @@ def test_external_unconfirmed_dispatch_is_not_resent_automatically(tmp_path, mon
 
     store = Store(tmp_path / "state.db")
     try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            thread_title="Inspect Brain understanding",
+            prompt="continue",
+            cwd=str(tmp_path),
+        )
+        store.update_job(
+            job_id,
+            status=JobStatus.EXTERNAL_ACTIVE,
+            goal_status="externalDispatchedAuto",
+            external_baseline_turn_id="baseline-turn",
+            external_dispatch_at=int(time.time()) - 61,
+        )
+        store.set_json("desktop_auto_dispatch", True)
+
+        def must_not_dispatch(**kwargs):
+            raise AssertionError("unconfirmed Desktop continuation must not be auto-resent")
+
+        monkeypatch.setattr(desktop_uia, "dispatch_to_codex_desktop", must_not_dispatch)
+        fake = FakeAppServer(latest_turn={"id": "baseline-turn", "status": "completed"})
+        supervisor = Supervisor(store, fake, SupervisorConfig())
+        asyncio.run(supervisor.run_once())
+
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.READY_OWNER
+        assert job.goal_status == "externalDispatchUnconfirmed"
+
+        # A later poll must remain fail-closed until the user explicitly retries.
+        asyncio.run(supervisor.run_once())
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.READY_OWNER
+        assert job.goal_status == "externalDispatchUnconfirmed"
+    finally:
+        store.close()
+
+
+def test_managed_permissions_profile_allows_project_read_and_scoped_write(tmp_path):
+    root = tmp_path / "project"
+    brain = root / "Brain"
+    modules = root / "Modules"
+    brain.mkdir(parents=True)
+    modules.mkdir(parents=True)
+    store = Store(tmp_path / "state.db")
+    try:
+        store.set_project("SBC", str(root), make_default=True)
+        store.set_scope("SBC", "brain", "Brain", make_default=True)
+        job_id = store.add_job("edit Brain", project_name="SBC", scope_name="brain")
+        store.update_job(job_id, status=JobStatus.ACTIVE, thread_id="thread-1")
+        supervisor = Supervisor(store, FakeAppServer(), SupervisorConfig())
+        permissions = {
+            "network": {"enabled": False},
+            "fileSystem": {
+                "read": [str(modules)],
+                "write": [str(brain)],
+            },
+        }
+
+        response = asyncio.run(supervisor._on_server_request(
+            "item/permissions/requestApproval",
+            {"threadId": "thread-1", "cwd": str(brain), "permissions": permissions},
+        ))
+        assert response == {"permissions": permissions, "scope": "turn"}
+        assert store.get_job(job_id).status is JobStatus.ACTIVE
+    finally:
+        store.close()
+
+
+def test_managed_permissions_profile_blocks_write_outside_selected_scope(tmp_path):
+    root = tmp_path / "project"
+    brain = root / "Brain"
+    modules = root / "Modules"
+    brain.mkdir(parents=True)
+    modules.mkdir(parents=True)
+    store = Store(tmp_path / "state.db")
+    try:
+        store.set_project("SBC", str(root), make_default=True)
+        store.set_scope("SBC", "brain", "Brain", make_default=True)
+        job_id = store.add_job("edit Brain", project_name="SBC", scope_name="brain")
+        store.update_job(job_id, status=JobStatus.ACTIVE, thread_id="thread-1")
+        supervisor = Supervisor(store, FakeAppServer(), SupervisorConfig())
+
+        response = asyncio.run(supervisor._on_server_request(
+            "item/permissions/requestApproval",
+            {
+                "threadId": "thread-1",
+                "cwd": str(brain),
+                "permissions": {"fileSystem": {"write": [str(modules)]}},
+            },
