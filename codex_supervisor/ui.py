@@ -693,3 +693,103 @@ class SupervisorUI:
         message = self._get_timer_message()
         if not message:
             messagebox.showerror("Auto Continue Timer", "Enter a continuation message.", parent=self.root)
+            return
+        self.continue_now_button.configure(state="disabled")
+        self.status_var.set("Sending Continue to the open Codex Desktop chat…")
+
+        def worker() -> None:
+            try:
+                from .desktop_uia import dispatch_to_current_codex_desktop
+                result = dispatch_to_current_codex_desktop(message=message)
+                store = self._store()
+                try:
+                    config = store.get_json("timer_config", {})
+                    if not isinstance(config, dict):
+                        config = {}
+                    config.update({
+                        "message": message,
+                        "state": "sent",
+                        "lastSentAt": int(time.time()),
+                        "lastDispatch": result,
+                        "lastError": None,
+                    })
+                    store.set_json("timer_config", config)
+                finally:
+                    store.close()
+                self.root.after(0, lambda: self.status_var.set("Continue dispatched to Codex Desktop"))
+            except Exception as exc:
+                error_text = str(exc)
+                def fail(message: str = error_text) -> None:
+                    self.status_var.set("Continue send failed")
+                    messagebox.showerror("Auto Continue Timer", message, parent=self.root)
+                self.root.after(0, fail)
+            finally:
+                self.root.after(0, lambda: self.continue_now_button.configure(state="normal"))
+                self.root.after(0, self._refresh_all)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _sync_worker_buttons(self) -> None:
+        running = bool(self.worker and self.worker.poll() is None)
+        self.start_button.configure(state="disabled" if running else "normal")
+        self.stop_button.configure(state="normal" if running else "disabled")
+
+    def _project_selected(self) -> None:
+        project = self.project_var.get()
+        if not project:
+            return
+        store = self._store()
+        try:
+            store.set_default_project(project)
+            default_scope = store.default_scope_name(project)
+            self.scope_var.set(default_scope or "")
+            self._refresh_scopes(store)
+        finally:
+            store.close()
+        self._refresh_all()
+
+    def _scope_selected(self) -> None:
+        project = self.project_var.get()
+        if not project:
+            return
+        store = self._store()
+        try:
+            scope = self.scope_var.get() or None
+            store.set_default_scope(project, scope)
+            self._update_target_path(store)
+        finally:
+            store.close()
+
+    def _ask_named_folder(
+        self,
+        *,
+        title: str,
+        name_label: str,
+        folder_label: str,
+        initial_name: str = "",
+        initial_folder: str = "",
+        browse_title: str,
+        browse_root: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Open one compact dialog for both a logical name and a real folder.
+
+        v0.2.2/v0.2.3 used two separate dialogs (name first, then a native
+        folder picker). That was technically functional but easy to mistake for
+        a manual-path workflow. Keep both fields visible in one surface instead.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        name_var = tk.StringVar(value=initial_name)
+        folder_var = tk.StringVar(value=initial_folder)
+        result: dict[str, tuple[str, str] | None] = {"value": None}
+
+        body = ttk.Frame(dialog, padding=12)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text=name_label).grid(row=0, column=0, sticky="w")
+        name_entry = ttk.Entry(body, textvariable=name_var, width=46)
+        name_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(3, 10))
