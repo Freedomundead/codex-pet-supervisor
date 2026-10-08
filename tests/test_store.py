@@ -178,3 +178,9 @@ def test_abandon_blocked_managed_job_unblocks_queue_without_deleting_thread(tmp_
         assert store.current_job().id == first
         store.abandon_blocked_job(first)
         abandoned = store.get_job(first)
+        assert abandoned.status is JobStatus.FAILED
+        assert abandoned.thread_id == "thread-1"
+        assert abandoned.goal_status == "abandoned"
+        assert store.current_job().id == second
+    finally:
+        store.close()
