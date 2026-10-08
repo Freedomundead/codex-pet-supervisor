@@ -592,3 +592,9 @@ class Store:
 
     @staticmethod
     def _row_to_scope(row: sqlite3.Row) -> Scope:
+        return Scope(
+            project_name=str(row["project_name"]),
+            name=str(row["name"]),
+            relative_path=str(row["relative_path"]),
+            updated_at=int(row["updated_at"]),
+        )
