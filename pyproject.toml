@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-allowance-supervisor"
+version = "0.4.1"
+description = "A Windows companion for Codex Desktop that watches usage limits and sends one continuation message after allowance resets."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Freedomundead" }
+]
+keywords = ["codex", "openai", "automation", "windows", "developer-tools", "productivity"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Win32 (MS Windows)",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: User Interfaces",
+  "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+codex-supervisor = "codex_supervisor.cli:main"
+
+[tool.setuptools]
+packages = ["codex_supervisor"]
