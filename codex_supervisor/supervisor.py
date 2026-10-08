@@ -94,3 +94,109 @@ class Supervisor:
             await self._advance_job(job)
         finally:
             await self.app_server.close()
+
+    async def _advance_timer(self, decision) -> int | None:
+        config = self.store.get_json("timer_config", {})
+        if not isinstance(config, dict) or not bool(config.get("enabled")):
+            return None
+
+        state = str(config.get("state") or "armed")
+        message = str(
+            config.get("message")
+            or "Continue the current task from where you stopped. Do not repeat completed work."
+        ).strip()
+
+        if not decision.allowed:
+            config.update(
+                {
+                    "state": "waiting_reset",
+                    "wakeAt": decision.wake_at,
+                    "lastReason": decision.reason,
+                    "lastError": None,
+                }
+            )
+            self.store.set_json("timer_config", config)
+            return decision.wake_at
+
+        if state != "waiting_reset":
+            if state not in {"armed", "sent"}:
+                config["state"] = "armed"
+                self.store.set_json("timer_config", config)
+            return None
+
+        try:
+            from .desktop_uia import DesktopDispatchError, dispatch_to_current_codex_desktop
+
+            result = await asyncio.to_thread(
+                dispatch_to_current_codex_desktop,
+                message=message,
+            )
+        except (DesktopDispatchError, OSError) as exc:
+            config.update(
+                {
+                    "state": "dispatch_failed",
+                    "lastError": str(exc),
+                    "lastAttemptAt": int(time.time()),
+                }
+            )
+            self.store.set_json("timer_config", config)
+            return None
+
+        config.update(
+            {
+                "state": "sent",
+                "wakeAt": None,
+                "lastError": None,
+                "lastSentAt": int(time.time()),
+                "lastDispatch": result,
+            }
+        )
+        self.store.set_json("timer_config", config)
+        return None
+
+    async def _advance_job(self, job: Job) -> None:
+        if job.ownership is ThreadOwnership.ADOPTED_EXTERNAL:
+            await self._advance_external_job(job)
+            return
+
+        await self._advance_managed_job(job)
+
+    async def _advance_external_job(self, job: Job) -> None:
+        latest: dict[str, Any] | None = None
+        if job.thread_id:
+            try:
+                latest = await self.app_server.latest_turn(job.thread_id)
+            except AppServerError as exc:
+                self.store.update_job(job.id, last_error=f"Could not observe Desktop task: {exc}")
+
+        if not job.thread_title and job.thread_id:
+            try:
+                metadata = await self.app_server.read_thread_metadata(job.thread_id)
+            except (AppServerError, AttributeError):
+                metadata = None
+            if isinstance(metadata, dict):
+                recovered_title = str(metadata.get("name") or metadata.get("preview") or "").strip()
+                if recovered_title:
+                    self.store.update_job(job.id, thread_title=recovered_title)
+                    refreshed = self.store.get_job(job.id)
+                    if refreshed is not None:
+                        job = refreshed
+
+        if job.status is JobStatus.EXTERNAL_ACTIVE:
+            await self._observe_external_active(job, latest)
+            return
+
+        baseline_id = str(latest.get("id")) if isinstance(latest, dict) and latest.get("id") else None
+        baseline_status = str(latest.get("status") or "") if isinstance(latest, dict) else ""
+
+        if baseline_id and baseline_status == "inProgress":
+            self.store.update_job(
+                job.id,
+                status=JobStatus.EXTERNAL_ACTIVE,
+                goal_status="externalRunning",
+                last_error=None,
+                external_baseline_turn_id=job.external_baseline_turn_id,
+                external_tracked_turn_id=baseline_id,
+                external_tracked_turn_status=baseline_status,
+            )
+            return
