@@ -15,8 +15,13 @@ FROZEN_PUBLIC_CORE = {
 
 
 def _git_blob_sha1(data: bytes) -> str:
-    header = f"blob {len(data)}\0".encode()
-    return hashlib.sha1(header + data).hexdigest()
+    # GitHub Actions checks this project out on Windows, where Git may materialize
+    # text files with CRLF even though the repository blob is stored with LF.
+    # Normalize checkout line endings before hashing so the guard detects real
+    # source changes rather than platform-specific working-tree bytes.
+    normalized = data.replace(b"\r\n", b"\n")
+    header = f"blob {len(normalized)}\0".encode()
+    return hashlib.sha1(header + normalized).hexdigest()
 
 
 def test_working_timer_core_is_frozen_during_ui_polish():

@@ -6,6 +6,12 @@ A small Windows companion for **Codex Desktop** that solves one very specific pr
 
 **Unofficial community project. Not affiliated with or endorsed by OpenAI.**
 
+## Screenshot
+
+![Codex Pet Supervisor Timer UI](docs/images/codex-pet-supervisor-timer.webp)
+
+*Timer view on Windows showing allowance, lifecycle state, continuation presets, and Auto Continue controls.*
+
 ## Why this exists
 
 Long-running work can hit a usage limit while you are away from the computer. The task itself may already know what it was doing; the missing part is simply returning at the reset time and saying “continue.”
