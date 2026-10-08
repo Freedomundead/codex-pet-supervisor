@@ -993,3 +993,103 @@ class SupervisorUI:
 
         # Prefer the selected project root. A Codex desktop thread usually records
         # the project root as cwd even when the user's logical Pet scope is deeper.
+        store = self._store()
+        try:
+            project_name = self.project_var.get().strip()
+            if project_name:
+                project = store.get_project(project_name)
+                if project:
+                    folder_var.set(str(Path(project.root).resolve()))
+        finally:
+            store.close()
+
+        tree_frame = ttk.Frame(body)
+        tree_frame.pack(fill="both", expand=True, pady=(0, 8))
+        cols = ("title", "cwd", "updated")
+        threads_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=11)
+        threads_tree.heading("title", text="Codex task")
+        threads_tree.heading("cwd", text="Working folder")
+        threads_tree.heading("updated", text="Updated")
+        threads_tree.column("title", width=360)
+        threads_tree.column("cwd", width=440)
+        threads_tree.column("updated", width=130, stretch=False)
+        threads_tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(tree_frame, orient="vertical", command=threads_tree.yview)
+        sb.pack(side="right", fill="y")
+        threads_tree.configure(yscrollcommand=sb.set)
+
+        ttk.Label(body, text="Continuation Goal").pack(anchor="w")
+        continuation = tk.Text(body, height=4, wrap="word")
+        continuation.pack(fill="x", pady=(4, 8))
+        continuation.insert(
+            "1.0",
+            "Continue and complete the unfinished task in this existing Codex thread. "
+            "Preserve completed work and continue from the next unfinished step. "
+            "Do not restart or repeat work that is already complete.",
+        )
+
+        status_var = tk.StringVar(
+            value="Enter part of the task title, then click Find Matching Tasks."
+        )
+        ttk.Label(body, textvariable=status_var).pack(anchor="w")
+        actions = ttk.Frame(body)
+        actions.pack(fill="x", pady=(10, 0))
+        find_button = ttk.Button(actions, text="Find Matching Tasks")
+        find_button.pack(side="left")
+        adopt_button = ttk.Button(actions, text="Adopt Selected", state="disabled")
+        adopt_button.pack(side="right")
+        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
+
+        thread_map: dict[str, dict] = {}
+        loading = {"active": False}
+
+        def populate(items: list[dict]) -> None:
+            for row in threads_tree.get_children():
+                threads_tree.delete(row)
+            thread_map.clear()
+            for item in items:
+                thread_id = str(item.get("id") or "")
+                if not thread_id:
+                    continue
+                title = str(item.get("name") or item.get("preview") or thread_id)
+                cwd = str(item.get("cwd") or "")
+                updated_raw = item.get("updatedAt")
+                try:
+                    updated = datetime.fromtimestamp(int(updated_raw)).strftime("%Y-%m-%d %H:%M")
+                except (TypeError, ValueError, OSError):
+                    updated = "—"
+                thread_map[thread_id] = item
+                threads_tree.insert("", "end", iid=thread_id, values=(title, cwd, updated))
+
+            rows = threads_tree.get_children()
+            if rows:
+                status_var.set(f"Found {len(rows)} matching task(s).")
+                threads_tree.selection_set(rows[0])
+                adopt_button.configure(state="normal")
+            else:
+                status_var.set(
+                    "No matching tasks found. Check the folder and use a shorter title fragment."
+                )
+                adopt_button.configure(state="disabled")
+
+        def set_loading(active: bool) -> None:
+            loading["active"] = active
+            find_button.configure(state="disabled" if active else "normal")
+            if active:
+                adopt_button.configure(state="disabled")
+
+        def find_matching() -> None:
+            if loading["active"]:
+                return
+            title = task_search_var.get().strip()
+            folder = folder_var.get().strip()
+            if not title and not folder:
+                messagebox.showerror(
+                    "Adopt Existing Task",
+                    "Enter a task-title fragment or choose a working folder.",
+                    parent=dialog,
+                )
+                return
+            if folder and not Path(folder).is_dir():
+                messagebox.showerror(
+                    "Adopt Existing Task", f"Folder does not exist: {folder}", parent=dialog
