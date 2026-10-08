@@ -298,3 +298,102 @@ while ([DateTime]::UtcNow -lt $deadline -and -not $titleMatched) {
         } catch {}
     }
     if (-not $titleMatched) { Start-Sleep -Milliseconds 400 }
+}
+if (-not $titleMatched -or $null -eq $targetProcess) {
+    throw ("Could not verify target Codex thread title in Desktop: " + $threadTitle)
+}
+
+$hwnd = [IntPtr]$targetProcess.MainWindowHandle
+[void][CodexPetWin32]::ShowWindow($hwnd, 9)
+[void][CodexPetWin32]::SetForegroundWindow($hwnd)
+Start-Sleep -Milliseconds 350
+
+$rect = New-Object CodexPetWin32+RECT
+if (-not [CodexPetWin32]::GetWindowRect($hwnd, [ref]$rect)) { throw 'Could not read Codex window rectangle' }
+$width = $rect.Right - $rect.Left
+$height = $rect.Bottom - $rect.Top
+if ($width -lt 700 -or $height -lt 500) { throw 'Codex window is too small for guarded composer dispatch' }
+
+# Codex Desktop's renderer does not currently expose the composer through UIA on
+# this Windows build. Use a window-relative point in the center of the composer
+# band, never an absolute screen coordinate. The exact thread-title verification
+# above prevents this from typing into an unrelated Codex task.
+$x = [int]($rect.Left + ($width * 0.67))
+$y = [int]($rect.Top + ($height * 0.875))
+[void][CodexPetWin32]::SetCursorPos($x, $y)
+[CodexPetWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+[CodexPetWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 300
+
+$oldClipboard = $null
+try { $oldClipboard = Get-Clipboard -Raw -ErrorAction SilentlyContinue } catch {}
+Set-Clipboard -Value $message
+[System.Windows.Forms.SendKeys]::SendWait('^v')
+Start-Sleep -Milliseconds 300
+[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+Start-Sleep -Milliseconds 500
+if ($null -ne $oldClipboard) {
+    try { Set-Clipboard -Value $oldClipboard } catch {}
+}
+
+[pscustomobject]@{
+    ok = $true
+    pid = $targetProcess.Id
+    threadId = $threadId
+    threadTitle = $threadTitle
+    clickX = $x
+    clickY = $y
+} | ConvertTo-Json -Compress
+'''
+
+
+def dispatch_to_codex_desktop(
+    *,
+    thread_id: str,
+    thread_title: str,
+    message: str,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    """Ask the existing Codex Desktop owner to submit a continuation message.
+
+    This does not touch App Server writer ownership. It navigates the Desktop app
+    to the exact thread, verifies the thread title through UI Automation, then
+    uses the Desktop composer as the owner-facing submission surface.
+    """
+    if os.name != "nt":
+        raise DesktopDispatchError("Codex Desktop automatic dispatch is supported on Windows only")
+    if not thread_id.strip() or not thread_title.strip() or not message.strip():
+        raise DesktopDispatchError("Thread id, thread title, and message are required")
+    exe = _powershell_executable()
+    env = os.environ.copy()
+    env["CODEX_PET_THREAD_ID"] = thread_id
+    env["CODEX_PET_THREAD_TITLE"] = thread_title
+    env["CODEX_PET_MESSAGE"] = message
+    try:
+        completed = subprocess.run(
+            [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _POWERSHELL_DISPATCH],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DesktopDispatchError(f"Codex Desktop dispatch timed out after {timeout_seconds}s") from exc
+    if completed.returncode != 0:
+        detail = _clean_process_output(completed.stderr or completed.stdout or "unknown PowerShell error")
+        raise DesktopDispatchError(f"Codex Desktop dispatch failed: {detail}")
+    raw = completed.stdout.strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise DesktopDispatchError("Codex Desktop dispatch returned invalid JSON") from exc
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        raise DesktopDispatchError("Codex Desktop dispatch did not report success")
+    return payload
+
+# Simple timer-mode dispatch. This deliberately does not inspect, resume, fork,
+# or otherwise acquire a Codex thread. It behaves like the user returning to the
+# already-open Codex Desktop conversation and sending one continuation message.
+_POWERSHELL_CURRENT_CHAT_DISPATCH = r'''
