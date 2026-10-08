@@ -88,7 +88,7 @@ def test_external_owner_controls_are_present():
     ui_path = Path(__file__).parents[1] / "codex_supervisor" / "ui.py"
     text = ui_path.read_text(encoding="utf-8")
     assert "Copy Continue" in text
-    assert "Mark Continue Sent" in text
+    assert "Mark Sent" in text
     assert "Mark Complete" in text
 
 
@@ -97,8 +97,8 @@ def test_v0213_ui_has_effectful_and_retry_controls():
     ui_path = Path(__file__).parents[1] / "codex_supervisor" / "ui.py"
     text = ui_path.read_text(encoding="utf-8")
     assert "Auto-dispatch adopted Desktop tasks" in text
-    assert "Retry Selected" in text
-    assert "Abandon Selected" in text
+    assert "Retry" in text
+    assert "Abandon" in text
     assert "Probe Desktop" in text
 
 
