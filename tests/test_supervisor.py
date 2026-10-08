@@ -88,3 +88,93 @@ def test_usage_limited_goal_is_reactivated_when_account_quota_is_available(tmp_p
         assert job is not None
         assert job.status is JobStatus.ACTIVE
         assert job.goal_status == "active"
+        goal_calls = [payload for name, payload in fake.calls if name == "set_goal"]
+        assert goal_calls == [{"thread_id": "thread-1", "objective": None, "status": "active"}]
+    finally:
+        store.close()
+
+
+def test_budget_limited_goal_is_not_overridden_as_account_quota(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.add_job("finish task", str(tmp_path))
+        store.update_job(job_id, status=JobStatus.ACTIVE, thread_id="thread-1")
+        fake = FakeAppServer(goal_status="budgetLimited")
+        supervisor = Supervisor(store, fake, SupervisorConfig())
+        asyncio.run(supervisor.run_once())
+
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.BLOCKED
+        assert all(name != "set_goal" for name, _ in fake.calls)
+    finally:
+        store.close()
+
+
+def test_adopted_external_thread_never_acquires_writer(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            prompt="continue from the unfinished step",
+            cwd=str(tmp_path),
+        )
+        store.set_json("desktop_auto_dispatch", False)
+        fake = FakeAppServer()
+        supervisor = Supervisor(store, fake, SupervisorConfig())
+        asyncio.run(supervisor.run_once())
+
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.READY_OWNER
+        assert job.goal_status == "externalReady"
+        assert "owned by Codex Desktop" in (job.last_error or "")
+        forbidden = {"resume_thread", "get_goal", "set_goal", "start_thread"}
+        assert forbidden.isdisjoint({name for name, _ in fake.calls})
+    finally:
+        store.close()
+
+
+def test_external_owner_mark_sent_is_monitor_only(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            prompt="continue",
+            cwd=str(tmp_path),
+        )
+        store.update_job(job_id, status=JobStatus.READY_OWNER, goal_status="externalReady")
+        store.mark_external_continue_sent(job_id)
+        store.set_json("desktop_auto_dispatch", False)
+
+        fake = FakeAppServer()
+        supervisor = Supervisor(store, fake, SupervisorConfig())
+        asyncio.run(supervisor.run_once())
+
+        job = store.get_job(job_id)
+        assert job.status is JobStatus.EXTERNAL_ACTIVE
+        forbidden = {"resume_thread", "get_goal", "set_goal", "start_thread"}
+        assert forbidden.isdisjoint({name for name, _ in fake.calls})
+    finally:
+        store.close()
+
+
+def test_external_owner_rearms_after_quota_cycle(tmp_path):
+    class ExhaustedFake(FakeAppServer):
+        async def read_rate_limits(self):
+            return {
+                "ordinaryUsageAllowed": False,
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 9999999999},
+                    "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 9999999999},
+                },
+            }
+
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            prompt="continue",
+            cwd=str(tmp_path),
+        )
