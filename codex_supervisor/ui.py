@@ -1093,3 +1093,103 @@ class SupervisorUI:
             if folder and not Path(folder).is_dir():
                 messagebox.showerror(
                     "Adopt Existing Task", f"Folder does not exist: {folder}", parent=dialog
+                )
+                return
+            set_loading(True)
+            status_var.set("Searching a small filtered set of Codex tasks…")
+
+            def worker() -> None:
+                try:
+                    items = asyncio.run(
+                        self._find_existing_threads(
+                            search_term=title or None,
+                            cwd=folder or None,
+                        )
+                    )
+                    self.root.after(0, lambda items=items: (set_loading(False), populate(items)))
+                except Exception as exc:
+                    self.root.after(
+                        0,
+                        lambda exc=exc: (
+                            set_loading(False),
+                            status_var.set(f"Task lookup failed: {exc}"),
+                        ),
+                    )
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def adopt() -> None:
+            selected = threads_tree.selection()
+            if not selected:
+                return
+            thread_id = selected[0]
+            item = thread_map.get(thread_id)
+            if not item:
+                return
+            objective = continuation.get("1.0", "end").strip()
+            if not objective:
+                messagebox.showerror(
+                    "Adopt Existing Task", "Continuation Goal cannot be empty.", parent=dialog
+                )
+                return
+            cwd = str(item.get("cwd") or "").strip()
+            thread_title = str(item.get("name") or item.get("preview") or "").strip()
+            if not cwd:
+                messagebox.showerror(
+                    "Adopt Existing Task", "Selected thread has no working folder.", parent=dialog
+                )
+                return
+            project = self.project_var.get() or None
+            scope = self.scope_var.get() or None
+            store = self._store()
+            try:
+                store.adopt_thread(
+                    thread_id=thread_id,
+                    prompt=objective,
+                    cwd=cwd,
+                    project_name=project,
+                    scope_name=scope,
+                    thread_title=thread_title or None,
+                )
+            except ValueError as exc:
+                messagebox.showerror("Adopt Existing Task", str(exc), parent=dialog)
+                return
+            finally:
+                store.close()
+            dialog.destroy()
+            self.status_var.set("Existing Codex task linked (external owner)")
+            self._refresh_all()
+
+        find_button.configure(command=find_matching)
+        adopt_button.configure(command=adopt)
+        search_entry.bind("<Return>", lambda _e: find_matching())
+        search_entry.focus_set()
+
+    async def _find_existing_threads(
+        self, *, search_term: str | None, cwd: str | None
+    ) -> list[dict]:
+        client = CodexAppServer()
+
+        async def operation() -> list[dict]:
+            await client.start()
+            try:
+                return await client.list_threads(
+                    limit=20,
+                    search_term=search_term,
+                    cwd=cwd,
+                    state_db_only=True,
+                )
+            finally:
+                await client.close()
+
+        try:
+            return await asyncio.wait_for(operation(), timeout=12)
+        except TimeoutError as exc:
+            await client.close()
+            raise RuntimeError(
+                "Filtered Codex task lookup timed out after 12 seconds"
+            ) from exc
+
+    def _desktop_auto_dispatch_changed(self) -> None:
+        store = self._store()
+        try:
