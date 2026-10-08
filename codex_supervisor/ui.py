@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -14,6 +15,7 @@ from .app_server import CodexAppServer
 from .models import JobStatus, ThreadOwnership
 from .rate_limits import decide_availability, normalize_rate_limits
 from .store import Store
+from .update_check import UpdateCheckError, check_for_update
 
 
 DEFAULT_TIMER_MESSAGE = "Continue the current task from where you stopped. Do not repeat completed work."
@@ -65,6 +67,9 @@ class SupervisorUI:
         self.desktop_status_var = tk.StringVar(value="Codex Desktop: checking…")
         self.desktop_activity_var = tk.StringVar(value="Activity: unknown")
         self.advanced_status_var = tk.StringVar(value="Labs are experimental and optional")
+        self.update_status_var = tk.StringVar(value="Updates: not checked")
+        self._update_checking = False
+        self._update_url: str | None = None
         self._timer_loaded = False
         self._quota_refreshing = False
         self._current_job_status: JobStatus | None = None
@@ -100,6 +105,11 @@ class SupervisorUI:
         ttk.Label(title, text="Codex Pet Supervisor", style="Title.TLabel").pack(anchor="w")
         ttk.Label(title, textvariable=self.status_var).pack(anchor="w", pady=(2, 0))
         ttk.Label(title, text="Created by Freedomundead • first vibe-coded open-source project", foreground="#666666").pack(anchor="w", pady=(2, 0))
+        update_row = ttk.Frame(title)
+        update_row.pack(anchor="w", pady=(3, 0))
+        ttk.Label(update_row, textvariable=self.update_status_var, foreground="#666666").pack(side="left")
+        self.update_button = ttk.Button(update_row, text="Check Updates", command=self._update_button_clicked, style="Tool.TButton")
+        self.update_button.pack(side="left", padx=(8, 0))
 
         engine = ttk.LabelFrame(header, text="Pet engine", padding=(8, 5))
         engine.pack(side="right")
@@ -305,6 +315,7 @@ class SupervisorUI:
         # spend a Codex work turn or consume the user's coding allowance.
         self.root.after(250, self._refresh_quota_async)
         self.root.after(350, self._refresh_desktop_status_async)
+        self.root.after(2500, self._check_updates_async)
         self.root.after(1500, self._tick)
         self.root.after(5000, self._desktop_tick)
         self.root.mainloop()
@@ -316,6 +327,49 @@ class SupervisorUI:
     def _desktop_tick(self) -> None:
         self._refresh_desktop_status_async()
         self.root.after(5000, self._desktop_tick)
+
+    def _update_button_clicked(self) -> None:
+        if self._update_url:
+            webbrowser.open(self._update_url)
+            return
+        self._check_updates_async()
+
+    def _check_updates_async(self) -> None:
+        if self._update_checking:
+            return
+        self._update_checking = True
+        self.update_status_var.set("Updates: checking GitHub Releases…")
+        self.update_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                info = check_for_update(timeout_seconds=5)
+
+                def apply() -> None:
+                    self._update_checking = False
+                    self.update_button.configure(state="normal")
+                    if info.update_available:
+                        self._update_url = info.release_url
+                        self.update_status_var.set(
+                            f"Update available: v{info.latest_version}  •  installed v{info.current_version}"
+                        )
+                        self.update_button.configure(text="Open Release")
+                    else:
+                        self._update_url = info.release_url
+                        self.update_status_var.set(f"Up to date: v{info.current_version}")
+                        self.update_button.configure(text="Latest Release" if self._update_url else "Check Updates")
+
+                self.root.after(0, apply)
+            except UpdateCheckError:
+                def fail() -> None:
+                    self._update_checking = False
+                    self._update_url = None
+                    self.update_status_var.set("Updates: check unavailable")
+                    self.update_button.configure(text="Retry", state="normal")
+
+                self.root.after(0, fail)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _refresh_desktop_status_async(self) -> None:
         if self._desktop_status_refreshing:
