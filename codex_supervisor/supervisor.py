@@ -574,3 +574,74 @@ class Supervisor:
                     block(reason)
                     return {"decision": "decline"}
             additional_permissions = params.get("additionalPermissions")
+            if additional_permissions is not None:
+                ok, reason = validate_permission_profile(additional_permissions)
+                if not ok:
+                    block(reason or "Codex requested unsupported additional permissions.")
+                    return {"decision": "decline"}
+            return {"decision": "accept"}
+
+        if method == "item/permissions/requestApproval":
+            permissions = params.get("permissions")
+            ok, reason = validate_permission_profile(permissions)
+            if not ok:
+                block(reason or "Codex requested unsupported permissions.")
+                return {"permissions": {}, "scope": "turn"}
+            return {"permissions": permissions or {}, "scope": "turn"}
+
+        raise AppServerError(f"Pet cannot automatically answer server request: {method}")
+
+    async def _refresh_rate_limits(self) -> None:
+        self._rate_limits = await self.app_server.read_rate_limits()
+        self.store.set_json("rate_limits", self._rate_limits)
+
+    async def _on_notification(self, note: RpcNotification) -> None:
+        if note.method == "account/rateLimits/updated":
+            snapshot = note.params.get("rateLimits")
+            if isinstance(snapshot, dict):
+                self._wake_event.set()
+            return
+
+        if note.method == "thread/goal/updated":
+            thread_id = note.params.get("threadId")
+            goal = note.params.get("goal")
+            if not isinstance(thread_id, str) or not isinstance(goal, dict):
+                return
+            job = self._job_for_thread(thread_id)
+            if job is None or job.ownership is ThreadOwnership.ADOPTED_EXTERNAL:
+                return
+            status = str(goal.get("status") or "")
+            self._apply_goal_status(job.id, status)
+            if status in {
+                GoalStatus.COMPLETE.value,
+                GoalStatus.BLOCKED.value,
+                GoalStatus.PAUSED.value,
+                GoalStatus.USAGE_LIMITED.value,
+                GoalStatus.BUDGET_LIMITED.value,
+            }:
+                self._wake_event.set()
+
+    def _job_for_thread(self, thread_id: str) -> Job | None:
+        for job in self.store.list_jobs():
+            if job.thread_id == thread_id:
+                return job
+        return None
+
+    async def _wait_until_reset(self, wake_at: int | None) -> None:
+        if wake_at is None:
+            await self._wait(self.config.poll_seconds)
+            return
+        delay = max(1, wake_at - int(time.time()) + self.config.reset_grace_seconds)
+        await self._wait(delay)
+
+    async def _wait(self, seconds: int) -> None:
+        self._wake_event.clear()
+        try:
+            await asyncio.wait_for(self._wake_event.wait(), timeout=max(1, seconds))
+        except TimeoutError:
+            pass
+        if self._wake_event.is_set():
+            try:
+                await self._refresh_rate_limits()
+            except AppServerError:
+                pass
