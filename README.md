@@ -111,6 +111,17 @@ start-pet.cmd
 start-pet-console.cmd
 ```
 
+## Updates
+
+The Pet checks the repository's **official GitHub Releases** after the UI opens.
+
+- It only checks the latest release metadata.
+- It does **not** download or install updates automatically.
+- If a newer release exists, the UI shows **Update available** and opens the official release page when you click **Open Release**.
+- If the computer is offline or GitHub cannot be reached, Timer operation continues normally.
+
+This update check is separate from the frozen Timer lifecycle.
+
 ## First-run checklist
 
 Before trusting a future reset:
@@ -179,7 +190,7 @@ data/supervisor.db
 
 The `data/` directory and database files are ignored by Git and should not be committed.
 
-The Timer workflow interacts with your local Codex Desktop window. Review the code before using automation on a sensitive workstation.
+The Timer workflow interacts with your local Codex Desktop window. The UI also makes a small request to the public GitHub Releases API to check for a newer Pet version; it does not auto-download or auto-install anything. Review the code before using automation on a sensitive workstation.
 
 ## Development
 
