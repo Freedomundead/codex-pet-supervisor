@@ -98,3 +98,103 @@ class SupervisorUI:
         title = ttk.Frame(header)
         title.pack(side="left", fill="x", expand=True)
         ttk.Label(title, text="Codex Pet Supervisor", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(title, textvariable=self.status_var).pack(anchor="w", pady=(2, 0))
+        ttk.Label(title, text="Created by Freedomundead • first vibe-coded open-source project", foreground="#666666").pack(anchor="w", pady=(2, 0))
+
+        engine = ttk.LabelFrame(header, text="Pet engine", padding=(8, 5))
+        engine.pack(side="right")
+        self.start_button = ttk.Button(engine, text="Start", command=self._start_worker, style="Tool.TButton")
+        self.start_button.pack(side="left")
+        self.stop_button = ttk.Button(engine, text="Stop", command=self._stop_worker, style="Tool.TButton")
+        self.stop_button.pack(side="left", padx=(6, 0))
+
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill="both", expand=True)
+        main_tab = ttk.Frame(self.notebook, padding=12)
+        advanced_tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(main_tab, text="Timer")
+        self.notebook.add(advanced_tab, text="Labs")
+
+        # ---------------- Timer tab ----------------
+        main_tab.columnconfigure(0, weight=3)
+        main_tab.columnconfigure(1, weight=2)
+        main_tab.rowconfigure(2, weight=1)
+
+        status_card = ttk.LabelFrame(main_tab, text="Live status", padding=12)
+        status_card.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        status_card.columnconfigure(1, weight=1)
+        ttk.Label(status_card, textvariable=self.timer_state_title_var, style="State.TLabel").grid(
+            row=0, column=0, rowspan=2, sticky="nw", padx=(0, 18)
+        )
+        ttk.Label(status_card, textvariable=self.desktop_status_var, font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Label(status_card, textvariable=self.desktop_activity_var).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(status_card, text="Next action", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=2, sticky="w", padx=(24, 0)
+        )
+        ttk.Label(status_card, textvariable=self.timer_next_action_var, wraplength=390).grid(
+            row=1, column=2, sticky="w", padx=(24, 0), pady=(4, 0)
+        )
+
+        quota = ttk.LabelFrame(main_tab, text="Allowance", padding=12)
+        quota.grid(row=1, column=0, sticky="nsew", padx=(0, 5), pady=(0, 10))
+        quota.columnconfigure(1, weight=1)
+        self.five_label = ttk.Label(quota, text="5-hour: —", width=34)
+        self.five_label.grid(row=0, column=0, sticky="w")
+        self.five_bar = ttk.Progressbar(quota, maximum=100)
+        self.five_bar.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        self.week_label = ttk.Label(quota, text="Weekly: —", width=34)
+        self.week_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.week_bar = ttk.Progressbar(quota, maximum=100)
+        self.week_bar.grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self.refresh_quota_button = ttk.Button(quota, text="Refresh", command=self._refresh_quota_async, style="Tool.TButton")
+        self.refresh_quota_button.grid(row=0, column=2, rowspan=2)
+        ttk.Label(quota, textvariable=self.quota_summary_var).grid(row=2, column=0, columnspan=3, sticky="w", pady=(9, 0))
+
+        lifecycle = ttk.LabelFrame(main_tab, text="Lifecycle", padding=12)
+        lifecycle.grid(row=1, column=1, sticky="nsew", padx=(5, 0), pady=(0, 10))
+        ttk.Label(lifecycle, textvariable=self.timer_state_var, font=("Segoe UI", 10, "bold"), wraplength=390).pack(anchor="w")
+        ttk.Separator(lifecycle, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Label(lifecycle, text="Last event", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(lifecycle, textvariable=self.timer_last_event_var, wraplength=390).pack(anchor="w", pady=(3, 0))
+
+        timer = ttk.LabelFrame(main_tab, text="Auto Continue", padding=12)
+        timer.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        timer.columnconfigure(0, weight=1)
+        timer.rowconfigure(3, weight=1)
+
+        intro = (
+            "Leave the Codex chat you want continued open. The Pet waits for a real usage-limit stop, "
+            "waits for allowance to return, then sends one saved continuation message."
+        )
+        ttk.Label(timer, text=intro, wraplength=980).grid(row=0, column=0, columnspan=3, sticky="w")
+
+        ttk.Label(timer, text="Continuation message", font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", pady=(10, 4))
+        preset_combo = ttk.Combobox(
+            timer,
+            textvariable=self.timer_preset_var,
+            values=list(TIMER_PRESETS) + ["Custom"],
+            state="readonly",
+            width=24,
+        )
+        preset_combo.grid(row=1, column=1, sticky="w", pady=(10, 4))
+        preset_combo.bind("<<ComboboxSelected>>", lambda _e: self._apply_timer_preset())
+        ttk.Label(timer, text="Presets only edit the box; Save Message stores the choice.").grid(
+            row=1, column=2, sticky="e", pady=(10, 4)
+        )
+
+        self.timer_message_entry = tk.Text(timer, height=6, wrap="word", undo=True, font=("Consolas", 10))
+        self.timer_message_entry.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(0, 10))
+        self._set_timer_message(DEFAULT_TIMER_MESSAGE)
+
+        controls = ttk.Frame(timer)
+        controls.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.arm_timer_button = ttk.Button(controls, text="Arm Timer", command=self._arm_timer, style="Primary.TButton")
+        self.arm_timer_button.pack(side="left")
+        self.disarm_timer_button = ttk.Button(controls, text="Disarm", command=self._disarm_timer, style="Tool.TButton")
+        self.disarm_timer_button.pack(side="left", padx=(8, 0))
+        self.save_timer_message_button = ttk.Button(controls, text="Save Message", command=self._save_timer_message, style="Tool.TButton")
+        self.save_timer_message_button.pack(side="left", padx=(8, 0))
+        self.continue_now_button = ttk.Button(controls, text="Send Test Now", command=self._send_continue_now, style="Tool.TButton")
+        self.continue_now_button.pack(side="right")
