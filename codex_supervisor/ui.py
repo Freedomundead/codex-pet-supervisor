@@ -198,3 +198,103 @@ class SupervisorUI:
         self.save_timer_message_button.pack(side="left", padx=(8, 0))
         self.continue_now_button = ttk.Button(controls, text="Send Test Now", command=self._send_continue_now, style="Tool.TButton")
         self.continue_now_button.pack(side="right")
+
+        ttk.Label(
+            main_tab,
+            text="Safe rule: the timer never needs a project/scope. Test Send Test Now once after installing a new Pet version.",
+            wraplength=1000,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(9, 0))
+
+        # ---------------- Labs tab ----------------
+        labs_notice = ttk.LabelFrame(advanced_tab, text="Labs • experimental", padding=10)
+        labs_notice.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        ttk.Label(
+            labs_notice,
+            text="Timer mode is the supported product. The tools below are experiments for contributors and may change; they are not required for Auto Continue.",
+            wraplength=960,
+        ).pack(anchor="w")
+
+        advanced_tab.columnconfigure(0, weight=1)
+        advanced_tab.columnconfigure(1, weight=1)
+        advanced_tab.rowconfigure(3, weight=1)
+
+        target = ttk.LabelFrame(advanced_tab, text="Workspace for managed Goals", padding=10)
+        target.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        ttk.Label(target, text="Project").grid(row=0, column=0, sticky="w")
+        self.project_combo = ttk.Combobox(target, textvariable=self.project_var, state="readonly", width=28)
+        self.project_combo.grid(row=0, column=1, sticky="ew", padx=6)
+        self.project_combo.bind("<<ComboboxSelected>>", lambda _e: self._project_selected())
+        ttk.Button(target, text="Set / Update Project", command=self._set_project).grid(row=0, column=2, padx=4)
+        ttk.Label(target, text="Scope").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.scope_combo = ttk.Combobox(target, textvariable=self.scope_var, state="readonly", width=28)
+        self.scope_combo.grid(row=1, column=1, sticky="ew", padx=6, pady=(8, 0))
+        self.scope_combo.bind("<<ComboboxSelected>>", lambda _e: self._scope_selected())
+        ttk.Button(target, text="Set / Update Scope", command=self._set_scope).grid(row=1, column=2, padx=4, pady=(8, 0))
+        ttk.Label(target, textvariable=self.target_path_var).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(target, text="Read: project context  •  Write/commands: selected scope").grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
+        target.columnconfigure(1, weight=1)
+
+        builder = ttk.LabelFrame(advanced_tab, text="Goal builder", padding=10)
+        builder.grid(row=2, column=0, sticky="nsew", padx=(0, 5), pady=(0, 10))
+        ttk.Label(builder, text="Write one Goal, or one Goal per non-empty line.").pack(anchor="w")
+        self.prompt = tk.Text(builder, height=7, wrap="word", undo=True)
+        self.prompt.pack(fill="both", expand=True, pady=(7, 7))
+        mode = ttk.Frame(builder)
+        mode.pack(fill="x")
+        ttk.Radiobutton(mode, text="One Goal", variable=self.queue_mode_var, value="single").pack(side="left")
+        ttk.Radiobutton(mode, text="One Goal per line", variable=self.queue_mode_var, value="lines").pack(side="left", padx=(12, 0))
+        ttk.Button(mode, text="Preview", command=self._preview_goal_builder).pack(side="right")
+        ttk.Label(builder, textvariable=self.preview_summary_var).pack(anchor="w", pady=(7, 3))
+        self.preview_list = tk.Listbox(builder, height=5, selectmode="extended", exportselection=False)
+        self.preview_list.pack(fill="both", expand=True)
+        build_actions = ttk.Frame(builder)
+        build_actions.pack(fill="x", pady=(7, 0))
+        ttk.Button(build_actions, text="Queue Selected", command=self._queue_selected_preview).pack(side="left")
+        ttk.Button(build_actions, text="Queue All", command=self._queue_all_preview).pack(side="left", padx=(7, 0))
+
+        tools = ttk.LabelFrame(advanced_tab, text="Task tools", padding=10)
+        tools.grid(row=2, column=1, sticky="nsew", padx=(5, 0), pady=(0, 10))
+        ttk.Label(tools, textvariable=self.current_var, wraplength=470).pack(anchor="w")
+        ttk.Separator(tools, orient="horizontal").pack(fill="x", pady=8)
+        row1 = ttk.Frame(tools)
+        row1.pack(fill="x")
+        ttk.Button(row1, text="Adopt Existing", command=self._adopt_existing_task).pack(side="left")
+        ttk.Button(row1, text="Edit", command=self._edit_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(row1, text="Remove", command=self._remove_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(row1, text="Refresh", command=self._refresh_all).pack(side="right")
+        row2 = ttk.Frame(tools)
+        row2.pack(fill="x", pady=(7, 0))
+        ttk.Button(row2, text="Probe Desktop", command=self._probe_desktop_async).pack(side="left")
+        ttk.Button(row2, text="Copy Continue", command=self._copy_external_continue).pack(side="left", padx=(6, 0))
+        ttk.Button(row2, text="Mark Sent", command=self._mark_external_sent).pack(side="left", padx=(6, 0))
+        ttk.Button(row2, text="Mark Complete", command=self._mark_external_complete).pack(side="left", padx=(6, 0))
+        row3 = ttk.Frame(tools)
+        row3.pack(fill="x", pady=(7, 0))
+        ttk.Button(row3, text="Retry", command=self._retry_selected).pack(side="left")
+        ttk.Button(row3, text="Abandon", command=self._abandon_selected).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(
+            row3,
+            text="Auto-dispatch adopted Desktop tasks (experimental)",
+            variable=self.desktop_auto_dispatch_var,
+            command=self._desktop_auto_dispatch_changed,
+        ).pack(side="right")
+        ttk.Label(tools, textvariable=self.advanced_status_var).pack(anchor="w", pady=(9, 0))
+
+        queue_frame = ttk.LabelFrame(advanced_tab, text="Queue", padding=8)
+        queue_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        ttk.Label(queue_frame, textvariable=self.queue_summary_var).pack(anchor="w", pady=(0, 6))
+        cols = ("pos", "status", "target", "goal")
+        self.tree = ttk.Treeview(queue_frame, columns=cols, show="headings", height=8)
+        self.tree.heading("pos", text="#")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("target", text="Project / Scope")
+        self.tree.heading("goal", text="Goal")
+        self.tree.column("pos", width=50, stretch=False, anchor="center")
+        self.tree.column("status", width=120, stretch=False)
+        self.tree.column("target", width=230)
+        self.tree.column("goal", width=520)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(queue_frame, orient="vertical", command=self.tree.yview)
+        sb.pack(side="right", fill="y")
