@@ -268,3 +268,93 @@ def test_managed_command_and_file_approvals_inside_scope_are_accepted(tmp_path):
         file_change = asyncio.run(supervisor._on_server_request(
             "item/fileChange/requestApproval",
             {"threadId": "thread-1", "grantRoot": str(brain)},
+        ))
+        assert command == {"decision": "accept"}
+        assert file_change == {"decision": "accept"}
+    finally:
+        store.close()
+
+
+def test_managed_approval_rejects_outside_scope_and_network_escalation(tmp_path):
+    root = tmp_path / "project"
+    brain = root / "Brain"
+    sibling = root / "Modules"
+    brain.mkdir(parents=True)
+    sibling.mkdir(parents=True)
+    store = Store(tmp_path / "state.db")
+    try:
+        store.set_project("SBC", str(root), make_default=True)
+        store.set_scope("SBC", "brain", "Brain", make_default=True)
+        job_id = store.add_job("edit Brain", project_name="SBC", scope_name="brain")
+        store.update_job(job_id, status=JobStatus.ACTIVE, thread_id="thread-1")
+        supervisor = Supervisor(store, FakeAppServer(), SupervisorConfig())
+
+        outside = asyncio.run(supervisor._on_server_request(
+            "item/fileChange/requestApproval",
+            {"threadId": "thread-1", "grantRoot": str(sibling)},
+        ))
+        assert outside == {"decision": "decline"}
+        blocked = store.get_job(job_id)
+        assert blocked is not None
+        assert blocked.status is JobStatus.BLOCKED
+        assert "outside the selected Pet scope" in (blocked.last_error or "")
+
+        # Re-arm only for the independent network check.
+        store.update_job(job_id, status=JobStatus.ACTIVE, last_error=None)
+        network = asyncio.run(supervisor._on_server_request(
+            "item/commandExecution/requestApproval",
+            {"threadId": "thread-1", "cwd": str(brain), "networkApprovalContext": {"host": "example.com"}},
+        ))
+        assert network == {"decision": "decline"}
+        blocked = store.get_job(job_id)
+        assert blocked is not None
+        assert blocked.status is JobStatus.BLOCKED
+        assert "network escalation" in (blocked.last_error or "").lower()
+    finally:
+        store.close()
+
+
+def test_external_auto_dispatch_uses_desktop_owner_without_acquiring_writer(tmp_path, monkeypatch):
+    from codex_supervisor import desktop_uia
+
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            thread_title="Inspect Brain understanding",
+            prompt="continue from the unfinished step",
+            cwd=str(tmp_path),
+        )
+        store.set_json("desktop_auto_dispatch", True)
+        sent: list[dict[str, str]] = []
+
+        def fake_dispatch(*, thread_id: str, thread_title: str, message: str, timeout_seconds: int = 20):
+            sent.append({"thread_id": thread_id, "thread_title": thread_title, "message": message})
+            return {"ok": True}
+
+        monkeypatch.setattr(desktop_uia, "dispatch_to_codex_desktop", fake_dispatch)
+        fake = FakeAppServer(latest_turn={"id": "baseline-turn", "status": "completed"})
+        asyncio.run(Supervisor(store, fake, SupervisorConfig()).run_once())
+
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.EXTERNAL_ACTIVE
+        assert job.goal_status == "externalDispatchedAuto"
+        assert job.external_baseline_turn_id == "baseline-turn"
+        assert sent == [{
+            "thread_id": "existing-thread",
+            "thread_title": "Inspect Brain understanding",
+            "message": "continue from the unfinished step",
+        }]
+        forbidden = {"resume_thread", "get_goal", "set_goal", "start_thread"}
+        assert forbidden.isdisjoint({name for name, _ in fake.calls})
+    finally:
+        store.close()
+
+
+def test_external_unconfirmed_dispatch_is_not_resent_automatically(tmp_path, monkeypatch):
+    from codex_supervisor import desktop_uia
+    import time
+
+    store = Store(tmp_path / "state.db")
+    try:
