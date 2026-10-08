@@ -375,3 +375,103 @@ class Supervisor:
                     thread_id=thread_id,
                     goal_status=GoalStatus.ACTIVE.value,
                     last_error=None,
+                )
+                await self.app_server.set_goal(thread_id, objective=job.prompt, status="active")
+                return
+
+            await self.app_server.resume_thread(job.thread_id)
+            goal = await self.app_server.get_goal(job.thread_id)
+            if goal:
+                status = str(goal.get("status") or "")
+                retry_requested = job.goal_status == "retryRequested"
+                if retry_requested and status in {GoalStatus.BLOCKED.value, GoalStatus.PAUSED.value}:
+                    await self.app_server.set_goal(job.thread_id, status=GoalStatus.ACTIVE.value)
+                    self.store.update_job(
+                        job.id,
+                        status=JobStatus.ACTIVE,
+                        goal_status=GoalStatus.ACTIVE.value,
+                        last_error=None,
+                    )
+                    return
+                self._apply_goal_status(job.id, status)
+                if status == GoalStatus.COMPLETE.value:
+                    return
+                if status == GoalStatus.USAGE_LIMITED.value:
+                    await self.app_server.set_goal(job.thread_id, status=GoalStatus.ACTIVE.value)
+                    self.store.update_job(
+                        job.id,
+                        status=JobStatus.ACTIVE,
+                        goal_status=GoalStatus.ACTIVE.value,
+                        last_error=None,
+                    )
+                    return
+                if status in {
+                    GoalStatus.BLOCKED.value,
+                    GoalStatus.PAUSED.value,
+                    GoalStatus.BUDGET_LIMITED.value,
+                }:
+                    return
+
+            self.store.update_job(job.id, status=JobStatus.ACTIVE, last_error=None)
+        except AppServerError as exc:
+            self.store.update_job(job.id, last_error=str(exc))
+            raise
+
+    def _apply_goal_status(self, job_id: int, status: str) -> None:
+        if status == GoalStatus.COMPLETE.value:
+            self.store.update_job(job_id, status=JobStatus.COMPLETE, goal_status=status, last_error=None)
+        elif status == GoalStatus.USAGE_LIMITED.value:
+            self.store.update_job(job_id, status=JobStatus.WAITING_QUOTA, goal_status=status)
+        elif status in {
+            GoalStatus.BLOCKED.value,
+            GoalStatus.PAUSED.value,
+            GoalStatus.BUDGET_LIMITED.value,
+        }:
+            message = {
+                GoalStatus.BLOCKED.value: "Codex Goal is blocked. Check the scope/permission boundary, then use Retry Selected.",
+                GoalStatus.PAUSED.value: "Codex Goal is paused. Use Retry Selected when it should continue.",
+                GoalStatus.BUDGET_LIMITED.value: "Codex Goal budget was reached; this is separate from account quota.",
+            }.get(status)
+            self.store.update_job(job_id, status=JobStatus.BLOCKED, goal_status=status, last_error=message)
+        elif status:
+            self.store.update_job(job_id, status=JobStatus.ACTIVE, goal_status=status)
+
+    async def _on_server_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Answer effectful approvals for Pet-managed jobs inside their scope.
+
+        v0.2.12 rejected every App Server approval request, which could push a
+        perfectly valid managed Goal into BLOCKED. Managed jobs now auto-approve
+        ordinary command/file actions that stay inside the selected Pet scope.
+        Scope escapes and network escalations fail closed and become visible in
+        the UI with an exact reason. Adopted Desktop tasks never route here.
+        """
+        from pathlib import Path
+
+        thread_id = params.get("threadId")
+        if not isinstance(thread_id, str):
+            raise AppServerError(f"Unsupported server request without thread id: {method}")
+        job = self._job_for_thread(thread_id)
+        if job is None or job.ownership is not ThreadOwnership.MANAGED:
+            raise AppServerError("Approval request does not belong to a Pet-managed task")
+
+        def block(reason: str) -> None:
+            self.store.update_job(
+                job.id,
+                status=JobStatus.BLOCKED,
+                goal_status=GoalStatus.BLOCKED.value,
+                last_error=reason,
+            )
+            self._wake_event.set()
+
+        write_root = self.store.resolve_job_cwd(job).resolve()
+        read_root = write_root
+        if job.project_name:
+            project = self.store.get_project(job.project_name)
+            if project is not None:
+                read_root = Path(project.root).expanduser().resolve()
+
+        def is_within(path_value: str, root: Path) -> bool:
+            try:
+                Path(path_value).expanduser().resolve().relative_to(root)
+                return True
+            except (ValueError, OSError):
