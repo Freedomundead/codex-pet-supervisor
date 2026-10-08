@@ -200,3 +200,117 @@ class Supervisor:
                 external_tracked_turn_status=baseline_status,
             )
             return
+
+        self.store.update_job(
+            job.id,
+            external_baseline_turn_id=baseline_id,
+            external_tracked_turn_id=None,
+            external_tracked_turn_status=baseline_status or None,
+        )
+
+        auto_dispatch = bool(self.store.get_json("desktop_auto_dispatch", True))
+        if job.goal_status == "externalDispatchUnconfirmed":
+            self.store.update_job(
+                job.id,
+                status=JobStatus.READY_OWNER,
+                last_error=(
+                    "The previous Desktop dispatch could not be verified by a new Codex turn. "
+                    "The Pet will not resend automatically because that could duplicate work. "
+                    "Use Retry Selected after checking the Desktop task."
+                ),
+            )
+            return
+
+        if auto_dispatch and job.thread_id and job.thread_title:
+            try:
+                from .desktop_uia import DesktopDispatchError, dispatch_to_codex_desktop
+
+                await asyncio.to_thread(
+                    dispatch_to_codex_desktop,
+                    thread_id=job.thread_id,
+                    thread_title=job.thread_title,
+                    message=job.prompt,
+                )
+            except (DesktopDispatchError, OSError) as exc:
+                self.store.update_job(
+                    job.id,
+                    status=JobStatus.READY_OWNER,
+                    goal_status="externalReady",
+                    last_error=(
+                        f"Automatic Desktop dispatch failed: {exc}. "
+                        "Use Copy Continue/Mark Continue Sent, or disable/retry Desktop auto-dispatch."
+                    ),
+                )
+                return
+
+            self.store.update_job(
+                job.id,
+                status=JobStatus.EXTERNAL_ACTIVE,
+                goal_status="externalDispatchedAuto",
+                last_error=None,
+                external_dispatch_at=int(time.time()),
+                external_tracked_turn_id=None,
+                external_tracked_turn_status=None,
+            )
+            return
+
+        reason = (
+            "Quota is available. This task is owned by Codex Desktop. "
+            "Automatic owner dispatch is disabled or this adopted task has no verified title. "
+            "Use Copy Continue/Mark Continue Sent."
+        )
+        self.store.update_job(
+            job.id,
+            status=JobStatus.READY_OWNER,
+            goal_status="externalReady",
+            last_error=reason,
+        )
+
+    async def _observe_external_active(self, job: Job, latest: dict[str, Any] | None) -> None:
+        if not isinstance(latest, dict) or not latest.get("id"):
+            return
+        turn_id = str(latest.get("id"))
+        turn_status = str(latest.get("status") or "")
+
+        tracked_id = job.external_tracked_turn_id
+        baseline_id = job.external_baseline_turn_id
+
+        if tracked_id is None:
+            if baseline_id and turn_id == baseline_id:
+                if job.external_dispatch_at and int(time.time()) - job.external_dispatch_at >= 60:
+                    self.store.update_job(
+                        job.id,
+                        status=JobStatus.READY_OWNER,
+                        goal_status="externalDispatchUnconfirmed",
+                        last_error=(
+                            "Desktop dispatch was attempted, but no new Codex turn appeared within 60 seconds. "
+                            "Automatic resend is disabled for this job to avoid duplicate work."
+                        ),
+                    )
+                    self._wake_event.set()
+                return
+            tracked_id = turn_id
+            self.store.update_job(
+                job.id,
+                external_tracked_turn_id=turn_id,
+                external_tracked_turn_status=turn_status or None,
+                goal_status="externalRunning" if turn_status == "inProgress" else job.goal_status,
+            )
+
+        if turn_id != tracked_id:
+            tracked_id = turn_id
+            self.store.update_job(
+                job.id,
+                external_tracked_turn_id=turn_id,
+                external_tracked_turn_status=turn_status or None,
+            )
+
+        if turn_status == "inProgress":
+            self.store.update_job(
+                job.id,
+                status=JobStatus.EXTERNAL_ACTIVE,
+                goal_status="externalRunning",
+                last_error=None,
+                external_tracked_turn_status=turn_status,
+            )
+            return
