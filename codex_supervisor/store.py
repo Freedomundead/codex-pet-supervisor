@@ -492,3 +492,103 @@ class Store:
         fields: list[str] = []
         values: list[Any] = []
         if status is not None:
+            fields.append("status = ?")
+            values.append(status.value)
+        if thread_id is not ...:
+            fields.append("thread_id = ?")
+            values.append(thread_id)
+        if goal_status is not ...:
+            fields.append("goal_status = ?")
+            values.append(goal_status)
+        if last_error is not ...:
+            fields.append("last_error = ?")
+            values.append(last_error)
+        if cwd is not ...:
+            fields.append("cwd = ?")
+            values.append(cwd)
+        if thread_title is not ...:
+            fields.append("thread_title = ?")
+            values.append(thread_title)
+        if external_baseline_turn_id is not ...:
+            fields.append("external_baseline_turn_id = ?")
+            values.append(external_baseline_turn_id)
+        if external_tracked_turn_id is not ...:
+            fields.append("external_tracked_turn_id = ?")
+            values.append(external_tracked_turn_id)
+        if external_tracked_turn_status is not ...:
+            fields.append("external_tracked_turn_status = ?")
+            values.append(external_tracked_turn_status)
+        if external_dispatch_at is not ...:
+            fields.append("external_dispatch_at = ?")
+            values.append(external_dispatch_at)
+        fields.append("updated_at = ?")
+        values.append(int(time.time()))
+        values.append(job_id)
+        self._conn.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id = ?", values)
+        self._conn.commit()
+
+    def resolve_job_cwd(self, job: Job) -> Path:
+        if job.thread_id and job.cwd:
+            return Path(job.cwd)
+        if job.project_name:
+            return self.resolve_target(job.project_name, job.scope_name)
+        if job.cwd:
+            return Path(job.cwd).expanduser().resolve()
+        raise ValueError(f"Job {job.id} has no project or working directory")
+
+    def job_target_label(self, job: Job) -> str:
+        if job.project_name:
+            logical = job.project_name
+            if job.scope_name:
+                logical += f" / {job.scope_name}"
+            if job.cwd:
+                return f"{logical} [{job.cwd}]"
+            return logical
+        return job.cwd or "-"
+
+    # ---------- Generic state ----------
+
+    def set_json(self, key: str, value: Any) -> None:
+        now = int(time.time())
+        self._conn.execute(
+            """
+            INSERT INTO kv(key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, json.dumps(value, separators=(",", ":")), now),
+        )
+        self._conn.commit()
+
+    def get_json(self, key: str, default: Any = None) -> Any:
+        row = self._conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else default
+
+    @staticmethod
+    def _row_to_job(row: sqlite3.Row) -> Job:
+        keys = set(row.keys())
+        return Job(
+            id=int(row["id"]),
+            prompt=str(row["prompt"]),
+            cwd=str(row["cwd"]),
+            status=JobStatus(row["status"]),
+            thread_id=row["thread_id"],
+            goal_status=row["goal_status"],
+            last_error=row["last_error"],
+            created_at=int(row["created_at"]),
+            updated_at=int(row["updated_at"]),
+            project_name=row["project_name"] if "project_name" in keys else None,
+            scope_name=row["scope_name"] if "scope_name" in keys else None,
+            thread_origin=(row["thread_origin"] if "thread_origin" in keys and row["thread_origin"] else "pet"),
+            thread_title=(row["thread_title"] if "thread_title" in keys else None),
+            external_baseline_turn_id=(row["external_baseline_turn_id"] if "external_baseline_turn_id" in keys else None),
+            external_tracked_turn_id=(row["external_tracked_turn_id"] if "external_tracked_turn_id" in keys else None),
+            external_tracked_turn_status=(row["external_tracked_turn_status"] if "external_tracked_turn_status" in keys else None),
+            external_dispatch_at=(int(row["external_dispatch_at"]) if "external_dispatch_at" in keys and row["external_dispatch_at"] is not None else None),
+        )
+
+    @staticmethod
+    def _row_to_project(row: sqlite3.Row) -> Project:
+        return Project(name=str(row["name"]), root=str(row["root"]), updated_at=int(row["updated_at"]))
+
+    @staticmethod
+    def _row_to_scope(row: sqlite3.Row) -> Scope:
