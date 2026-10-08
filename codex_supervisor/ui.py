@@ -1293,3 +1293,103 @@ class SupervisorUI:
         dialog.title("Edit queued Goal")
         dialog.transient(self.root)
         dialog.grab_set()
+        dialog.geometry("720x430")
+
+        body = ttk.Frame(dialog, padding=12)
+        body.pack(fill="both", expand=True)
+        project_var = tk.StringVar(value=job.project_name or self.project_var.get())
+        scope_var = tk.StringVar(value=job.scope_name or "")
+
+        ttk.Label(body, text="Project").grid(row=0, column=0, sticky="w")
+        project_combo = ttk.Combobox(body, textvariable=project_var, state="readonly", values=project_names)
+        project_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(body, text="Scope").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        scope_combo = ttk.Combobox(body, textvariable=scope_var, state="readonly")
+        scope_combo.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(body, text="Goal").grid(row=2, column=0, sticky="nw", pady=(10, 0))
+        goal_text = tk.Text(body, height=12, wrap="word")
+        goal_text.grid(row=2, column=1, sticky="nsew", padx=(8, 0), pady=(10, 0))
+        goal_text.insert("1.0", job.prompt)
+
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(2, weight=1)
+
+        def refresh_scopes() -> None:
+            project_name = project_var.get()
+            local_store = self._store()
+            try:
+                names = [""] + [item.name for item in local_store.list_scopes(project_name)]
+            finally:
+                local_store.close()
+            scope_combo["values"] = names
+            if scope_var.get() not in names:
+                scope_var.set("")
+
+        project_combo.bind("<<ComboboxSelected>>", lambda _e: refresh_scopes())
+        refresh_scopes()
+        if job.scope_name in scope_combo["values"]:
+            scope_var.set(job.scope_name or "")
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        def save() -> None:
+            prompt = goal_text.get("1.0", "end").strip()
+            project_name = project_var.get() or None
+            scope_name = scope_var.get() or None
+            local_store = self._store()
+            try:
+                local_store.edit_job(
+                    job_id,
+                    prompt=prompt,
+                    project_name=project_name,
+                    scope_name=scope_name,
+                )
+            except ValueError as exc:
+                messagebox.showerror("Edit Goal", str(exc), parent=dialog)
+                return
+            finally:
+                local_store.close()
+            dialog.destroy()
+            self.status_var.set("Queued Goal updated")
+            self._refresh_all()
+
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right")
+        ttk.Button(buttons, text="Save Changes", command=save).pack(side="right", padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        goal_text.focus_set()
+
+    def _selected_job(self):
+        selected = self.tree.selection()
+        store = self._store()
+        try:
+            if selected:
+                return store.get_job(int(selected[0]))
+            # Convenience: external-owner controls act on the current queue head
+            # when the user has not explicitly selected a row.
+            return store.current_job()
+        finally:
+            store.close()
+
+
+    def _probe_desktop_async(self) -> None:
+        """Read-only inspect the exact Codex Desktop accessibility surface."""
+        self.status_var.set("Probing Codex Desktop accessibility tree…")
+
+        def worker() -> None:
+            try:
+                from .desktop_uia import (
+                    DesktopProbeError,
+                    probe_codex_desktop,
+                    save_probe_report,
+                    summarize_probe,
+                )
+                payload = probe_codex_desktop()
+                report_path = Path(self.db_path).parent / "desktop-probe.json"
+                report = save_probe_report(payload, report_path)
+                summary = summarize_probe(payload)
+
+                def finish() -> None:
+                    lines = [
+                        f"Codex windows found: {summary.windows}",
+                        f"Accessibility elements captured: {summary.elements}",
