@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+title: Codex Pet Supervisor
+message: "If this project helps your workflow, please credit the project and its creator."
+type: software
+authors:
+  - name: Freedomundead
+version: 0.4.1
+date-released: 2026-10-08
+license: MIT
