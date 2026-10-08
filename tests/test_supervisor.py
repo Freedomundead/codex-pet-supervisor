@@ -448,3 +448,93 @@ def test_managed_permissions_profile_blocks_write_outside_selected_scope(tmp_pat
                 "cwd": str(brain),
                 "permissions": {"fileSystem": {"write": [str(modules)]}},
             },
+        ))
+        assert response == {"permissions": {}, "scope": "turn"}
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.BLOCKED
+        assert "outside the allowed selected Pet scope" in (job.last_error or "")
+    finally:
+        store.close()
+
+
+def test_managed_command_additional_permissions_are_validated(tmp_path):
+    root = tmp_path / "project"
+    brain = root / "Brain"
+    modules = root / "Modules"
+    brain.mkdir(parents=True)
+    modules.mkdir(parents=True)
+    store = Store(tmp_path / "state.db")
+    try:
+        store.set_project("SBC", str(root), make_default=True)
+        store.set_scope("SBC", "brain", "Brain", make_default=True)
+        job_id = store.add_job("edit Brain", project_name="SBC", scope_name="brain")
+        store.update_job(job_id, status=JobStatus.ACTIVE, thread_id="thread-1")
+        supervisor = Supervisor(store, FakeAppServer(), SupervisorConfig())
+
+        accepted = asyncio.run(supervisor._on_server_request(
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread-1",
+                "cwd": str(brain),
+                "additionalPermissions": {
+                    "network": {"enabled": False},
+                    "fileSystem": {"read": [str(modules)], "write": [str(brain)]},
+                },
+            },
+        ))
+        assert accepted == {"decision": "accept"}
+
+        blocked = asyncio.run(supervisor._on_server_request(
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread-1",
+                "cwd": str(brain),
+                "additionalPermissions": {"network": {"enabled": True}},
+            },
+        ))
+        assert blocked == {"decision": "decline"}
+        assert store.get_job(job_id).status is JobStatus.BLOCKED
+    finally:
+        store.close()
+
+
+def test_timer_does_not_send_while_quota_is_available_before_limit(tmp_path, monkeypatch):
+    store = Store(tmp_path / "state.db")
+    sent = []
+    monkeypatch.setattr(
+        "codex_supervisor.desktop_uia.dispatch_to_current_codex_desktop",
+        lambda *, message: sent.append(message) or {"ok": True},
+    )
+    try:
+        store.set_json(
+            "timer_config",
+            {"enabled": True, "message": "continue", "state": "armed"},
+        )
+        asyncio.run(Supervisor(store, FakeAppServer(), SupervisorConfig()).run_once())
+        assert sent == []
+        config = store.get_json("timer_config")
+        assert config["state"] == "armed"
+    finally:
+        store.close()
+
+
+def test_timer_arms_on_exhaustion_then_sends_once_when_allowance_returns(tmp_path, monkeypatch):
+    class ExhaustedFake(FakeAppServer):
+        async def read_rate_limits(self):
+            return {
+                "ordinaryUsageAllowed": False,
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1999999999},
+                    "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 2999999999},
+                },
+            }
+
+    store = Store(tmp_path / "state.db")
+    sent = []
+    monkeypatch.setattr(
+        "codex_supervisor.desktop_uia.dispatch_to_current_codex_desktop",
+        lambda *, message: sent.append(message) or {"ok": True, "pid": 1},
+    )
+    try:
