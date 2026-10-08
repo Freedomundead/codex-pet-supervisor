@@ -893,3 +893,103 @@ class SupervisorUI:
             folder_label="Folder inside the project",
             initial_name=current_name,
             initial_folder=current_folder,
+            browse_title=f"Select scope folder inside {project}",
+            browse_root=str(root),
+        )
+        if selected is None:
+            return
+        name, selected_folder = selected
+        target = Path(selected_folder).resolve()
+        try:
+            relative = target.relative_to(root)
+        except ValueError:
+            messagebox.showerror("Scope", "Scope must stay inside the project root.", parent=self.root)
+            return
+
+        store = self._store()
+        try:
+            store.set_scope(project, name, str(relative) if str(relative) else ".", make_default=True)
+            store.set_default_scope(project, name)
+        finally:
+            store.close()
+        self.scope_var.set(name)
+        self._refresh_all()
+
+    def _queue_prompts(self, prompts: list[str]) -> None:
+        prompts = [prompt.strip() for prompt in prompts if prompt.strip()]
+        if not prompts:
+            return
+        project = self.project_var.get() or None
+        scope = self.scope_var.get() or None
+        if project is None:
+            messagebox.showerror("Add Goal", "Set a project first.", parent=self.root)
+            return
+        store = self._store()
+        try:
+            target = store.resolve_target(project, scope)
+            if not target.is_dir():
+                raise ValueError(f"Target folder does not exist: {target}")
+            store.add_jobs(prompts, project_name=project, scope_name=scope)
+        except ValueError as exc:
+            messagebox.showerror("Add Goal", str(exc), parent=self.root)
+            return
+        finally:
+            store.close()
+        self.prompt.delete("1.0", "end")
+        self.status_var.set(f"Queued {len(prompts)} Goal{'s' if len(prompts) != 1 else ''}")
+        self._refresh_all()
+
+    def _add_job(self) -> None:
+        prompt = self.prompt.get("1.0", "end").strip()
+        if prompt:
+            self._queue_prompts([prompt])
+
+    def _add_sequence(self) -> None:
+        prompts = split_sequence_lines(self.prompt.get("1.0", "end"))
+        if not prompts:
+            return
+        self._queue_prompts(prompts)
+
+    def _adopt_existing_task(self) -> None:
+        """Attach one existing Codex thread without enumerating global history."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Adopt Existing Codex Task")
+        dialog.transient(self.root)
+        dialog.geometry("980x620")
+        dialog.grab_set()
+
+        body = ttk.Frame(dialog, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=(
+                "Find the existing Codex task by folder and title. "
+                "Codex Desktop remains the owner; the Pet supervises quota and completion."
+            ),
+        ).pack(anchor="w")
+
+        search_box = ttk.LabelFrame(body, text="Find existing task", padding=10)
+        search_box.pack(fill="x", pady=(10, 8))
+        task_search_var = tk.StringVar()
+        folder_var = tk.StringVar()
+
+        ttk.Label(search_box, text="Task title contains").grid(row=0, column=0, sticky="w")
+        search_entry = ttk.Entry(search_box, textvariable=task_search_var)
+        search_entry.grid(row=0, column=1, sticky="ew", padx=(8, 6))
+
+        ttk.Label(search_box, text="Folder filter").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        folder_entry = ttk.Entry(search_box, textvariable=folder_var)
+        folder_entry.grid(row=1, column=1, sticky="ew", padx=(8, 6), pady=(8, 0))
+
+        def browse_folder() -> None:
+            selected = filedialog.askdirectory(parent=dialog, title="Choose Codex task working folder")
+            if selected:
+                folder_var.set(str(Path(selected).resolve()))
+
+        ttk.Button(search_box, text="Browse…", command=browse_folder).grid(
+            row=1, column=2, pady=(8, 0)
+        )
+        search_box.columnconfigure(1, weight=1)
+
+        # Prefer the selected project root. A Codex desktop thread usually records
+        # the project root as cwd even when the user's logical Pet scope is deeper.
