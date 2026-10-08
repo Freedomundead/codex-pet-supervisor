@@ -397,3 +397,103 @@ def dispatch_to_codex_desktop(
 # or otherwise acquire a Codex thread. It behaves like the user returning to the
 # already-open Codex Desktop conversation and sending one continuation message.
 _POWERSHELL_CURRENT_CHAT_DISPATCH = r'''
+$ErrorActionPreference = 'Stop'
+if ($null -ne $PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class CodexPetTimerWin32 {
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+}
+"@
+
+$message = [string]$env:CODEX_PET_MESSAGE
+$targetPidText = [string]$env:CODEX_PET_TARGET_PID
+$targetHwndText = [string]$env:CODEX_PET_TARGET_HWND
+if ([string]::IsNullOrWhiteSpace($message)) { throw 'Missing continuation message' }
+if ([string]::IsNullOrWhiteSpace($targetPidText)) { throw 'Missing verified Codex Desktop PID' }
+if ([string]::IsNullOrWhiteSpace($targetHwndText)) { throw 'Missing verified Codex Desktop window handle' }
+
+[int]$targetPid = 0
+[long]$targetHwndNumber = 0
+if (-not [int]::TryParse($targetPidText, [ref]$targetPid)) { throw 'Invalid verified Codex Desktop PID' }
+if (-not [long]::TryParse($targetHwndText, [ref]$targetHwndNumber)) { throw 'Invalid verified Codex Desktop window handle' }
+$hwnd = [IntPtr]$targetHwndNumber
+if (-not [CodexPetTimerWin32]::IsWindow($hwnd)) { throw 'The verified Codex Desktop window no longer exists. No message was sent.' }
+
+try { $targetProcess = Get-Process -Id $targetPid -ErrorAction Stop } catch { throw 'The verified Codex Desktop process is no longer running. No message was sent.' }
+if ([IntPtr]$targetProcess.MainWindowHandle -ne $hwnd) { throw 'Codex Desktop changed windows after detection. No message was sent; try again.' }
+if ($targetProcess.MainWindowTitle -eq 'Codex Pet Supervisor') { throw 'Refusing to target the Pet window.' }
+if ($targetProcess.ProcessName -match '^(python|pythonw|powershell|pwsh|WindowsTerminal|chrome|msedge|firefox)$') { throw ('Refusing unsafe target process: ' + $targetProcess.ProcessName) }
+if (-not [CodexPetTimerWin32]::IsWindowVisible($hwnd)) { throw 'The verified Codex Desktop window is not visible. No message was sent.' }
+
+function Test-ForegroundProcess([int]$expectedPid) {
+    $fg = [CodexPetTimerWin32]::GetForegroundWindow()
+    if ($fg -eq [IntPtr]::Zero) { return $false }
+    [uint32]$fgPid = 0
+    [void][CodexPetTimerWin32]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+    return ([int]$fgPid -eq $expectedPid)
+}
+
+function Force-CodexForeground([IntPtr]$targetWindow, [int]$expectedPid) {
+    [void][CodexPetTimerWin32]::ShowWindow($targetWindow, 9)
+    Start-Sleep -Milliseconds 100
+    $fg = [CodexPetTimerWin32]::GetForegroundWindow()
+    [uint32]$fgPid = 0
+    [uint32]$fgThread = 0
+    if ($fg -ne [IntPtr]::Zero) { $fgThread = [CodexPetTimerWin32]::GetWindowThreadProcessId($fg, [ref]$fgPid) }
+    [uint32]$ownerPid = 0
+    $targetThread = [CodexPetTimerWin32]::GetWindowThreadProcessId($targetWindow, [ref]$ownerPid)
+    $currentThread = [CodexPetTimerWin32]::GetCurrentThreadId()
+    $attachedForeground = $false
+    $attachedTarget = $false
+    try {
+        if ($fgThread -ne 0 -and $fgThread -ne $currentThread) { $attachedForeground = [CodexPetTimerWin32]::AttachThreadInput($currentThread, $fgThread, $true) }
+        if ($targetThread -ne 0 -and $targetThread -ne $currentThread) { $attachedTarget = [CodexPetTimerWin32]::AttachThreadInput($currentThread, $targetThread, $true) }
+        [void][CodexPetTimerWin32]::BringWindowToTop($targetWindow)
+        [void][CodexPetTimerWin32]::SetForegroundWindow($targetWindow)
+        [void][CodexPetTimerWin32]::SetActiveWindow($targetWindow)
+        [void][CodexPetTimerWin32]::SetFocus($targetWindow)
+    } finally {
+        if ($attachedTarget) { [void][CodexPetTimerWin32]::AttachThreadInput($currentThread, $targetThread, $false) }
+        if ($attachedForeground) { [void][CodexPetTimerWin32]::AttachThreadInput($currentThread, $fgThread, $false) }
+    }
+    Start-Sleep -Milliseconds 250
+    if (-not (Test-ForegroundProcess $expectedPid)) { [CodexPetTimerWin32]::SwitchToThisWindow($targetWindow, $true); Start-Sleep -Milliseconds 350 }
+    return (Test-ForegroundProcess $expectedPid)
+}
+
+if (-not (Force-CodexForeground $hwnd $targetPid)) { throw ('Windows could not foreground the already-detected Codex Desktop window (PID ' + $targetPid + '). No message was sent.') }
+
+$r = New-Object CodexPetTimerWin32+RECT
+if (-not [CodexPetTimerWin32]::GetWindowRect($hwnd, [ref]$r)) { throw 'Could not read the Codex Desktop window rectangle. No message was sent.' }
+$width = [double]($r.Right - $r.Left)
+$height = [double]($r.Bottom - $r.Top)
+if ($width -lt 500 -or $height -lt 350) { throw 'Codex Desktop window is too small for composer dispatch. No message was sent.' }
+
+$x = [int]($r.Left + ($width * 0.68))
+$y = [int]($r.Top + ($height * 0.875))
+if (-not (Test-ForegroundProcess $targetPid)) { throw 'Codex Desktop lost foreground ownership before the composer click. No message was sent.' }
+[void][CodexPetTimerWin32]::SetCursorPos($x, $y)
+[CodexPetTimerWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+[CodexPetTimerWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 250
+if (-not (Test-ForegroundProcess $targetPid)) { throw 'Codex Desktop lost foreground ownership after the composer click. No message was sent.' }
+
+$oldClipboard = $null
