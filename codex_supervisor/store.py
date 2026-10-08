@@ -196,3 +196,103 @@ class Store:
         prompt: str,
         cwd: str = "",
         *,
+        project_name: str | None = None,
+        scope_name: str | None = None,
+    ) -> int:
+        return self.add_jobs(
+            [prompt],
+            cwd=cwd,
+            project_name=project_name,
+            scope_name=scope_name,
+        )[0]
+
+    def add_jobs(
+        self,
+        prompts: list[str] | tuple[str, ...],
+        cwd: str = "",
+        *,
+        project_name: str | None = None,
+        scope_name: str | None = None,
+    ) -> list[int]:
+        cleaned = [str(prompt).strip() for prompt in prompts if str(prompt).strip()]
+        if not cleaned:
+            return []
+        now = int(time.time())
+        ids: list[int] = []
+        for prompt in cleaned:
+            cur = self._conn.execute(
+                """
+                INSERT INTO jobs(prompt, cwd, status, created_at, updated_at, project_name, scope_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (prompt, cwd, JobStatus.QUEUED.value, now, now, project_name, scope_name),
+            )
+            ids.append(int(cur.lastrowid))
+        self._conn.commit()
+        return ids
+
+    def adopt_thread(
+        self,
+        *,
+        thread_id: str,
+        prompt: str,
+        cwd: str,
+        project_name: str | None = None,
+        scope_name: str | None = None,
+        thread_title: str | None = None,
+        goal_status: str | None = "externalPending",
+    ) -> int:
+        if not thread_id.strip():
+            raise ValueError("Thread id is required")
+        existing = self._conn.execute(
+            "SELECT id FROM jobs WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        if existing:
+            raise ValueError(f"Thread is already managed by job {existing['id']}")
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("Continuation Goal cannot be empty")
+        now = int(time.time())
+        cur = self._conn.execute(
+            """
+            INSERT INTO jobs(
+                prompt, cwd, status, thread_id, goal_status, created_at, updated_at,
+                project_name, scope_name, thread_origin, thread_title
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                prompt,
+                cwd,
+                JobStatus.QUEUED.value,
+                thread_id,
+                goal_status,
+                now,
+                now,
+                project_name,
+                scope_name,
+                ThreadOwnership.ADOPTED_EXTERNAL.value,
+                thread_title,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def edit_job(
+        self,
+        job_id: int,
+        *,
+        prompt: str,
+        project_name: str | None = None,
+        scope_name: str | None = None,
+    ) -> None:
+        job = self.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job: {job_id}")
+        if job.thread_id and job.ownership is not ThreadOwnership.ADOPTED_EXTERNAL:
+            raise ValueError("Cannot edit a Pet-managed job that already has a Codex thread")
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("Goal cannot be empty")
+        if project_name is not None:
+            if self.get_project(project_name) is None:
+                raise ValueError(f"Unknown project: {project_name}")
