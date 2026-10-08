@@ -171,3 +171,12 @@ def test_v041_public_ui_has_creator_credit_and_experimental_labs_notice():
     assert 'text="Labs • experimental"' in text
     assert "Timer mode is the supported product" in text
     assert 'self.desktop_auto_dispatch_var = tk.BooleanVar(value=False)' in text
+
+
+def test_public_ui_has_release_update_check():
+    ui_path = Path(__file__).parents[1] / "codex_supervisor" / "ui.py"
+    text = ui_path.read_text(encoding="utf-8")
+    assert 'text="Check Updates"' in text
+    assert 'def _check_updates_async' in text
+    assert 'def _update_button_clicked' in text
+    assert 'webbrowser.open(self._update_url)' in text
