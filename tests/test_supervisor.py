@@ -538,3 +538,54 @@ def test_timer_arms_on_exhaustion_then_sends_once_when_allowance_returns(tmp_pat
         lambda *, message: sent.append(message) or {"ok": True, "pid": 1},
     )
     try:
+        store.set_json(
+            "timer_config",
+            {"enabled": True, "message": "continue exactly once", "state": "armed"},
+        )
+        asyncio.run(Supervisor(store, ExhaustedFake(), SupervisorConfig()).run_once())
+        assert sent == []
+        config = store.get_json("timer_config")
+        assert config["state"] == "waiting_reset"
+        assert config["wakeAt"] == 1999999999
+
+        asyncio.run(Supervisor(store, FakeAppServer(), SupervisorConfig()).run_once())
+        assert sent == ["continue exactly once"]
+        config = store.get_json("timer_config")
+        assert config["state"] == "sent"
+
+        # Still-available allowance must not send a duplicate message.
+        asyncio.run(Supervisor(store, FakeAppServer(), SupervisorConfig()).run_once())
+        assert sent == ["continue exactly once"]
+    finally:
+        store.close()
+
+
+def test_timer_dispatch_failure_is_visible_and_not_retried_while_available(tmp_path, monkeypatch):
+    from codex_supervisor.desktop_uia import DesktopDispatchError
+
+    store = Store(tmp_path / "state.db")
+    attempts = []
+
+    def fail(*, message):
+        attempts.append(message)
+        raise DesktopDispatchError("Codex Desktop is closed")
+
+    monkeypatch.setattr(
+        "codex_supervisor.desktop_uia.dispatch_to_current_codex_desktop",
+        fail,
+    )
+    try:
+        store.set_json(
+            "timer_config",
+            {"enabled": True, "message": "continue", "state": "waiting_reset"},
+        )
+        asyncio.run(Supervisor(store, FakeAppServer(), SupervisorConfig()).run_once())
+        assert attempts == ["continue"]
+        config = store.get_json("timer_config")
+        assert config["state"] == "dispatch_failed"
+        assert "Codex Desktop is closed" in config["lastError"]
+
+        asyncio.run(Supervisor(store, FakeAppServer(), SupervisorConfig()).run_once())
+        assert attempts == ["continue"]
+    finally:
+        store.close()
