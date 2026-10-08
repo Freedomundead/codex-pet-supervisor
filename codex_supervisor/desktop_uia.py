@@ -198,3 +198,103 @@ def summarize_probe(payload: dict[str, Any]) -> DesktopProbeSummary:
                 composers.append(display)
             if "button" in control_type.lower() and any(word in hay for word in send_words) and len(sends) < 20:
                 sends.append(display)
+
+    return DesktopProbeSummary(
+        windows=len(windows),
+        elements=total,
+        likely_thread_items=tuple(threads),
+        likely_composers=tuple(composers),
+        likely_send_controls=tuple(sends),
+    )
+
+
+class DesktopDispatchError(RuntimeError):
+    pass
+
+
+# Effectful owner-dispatch adapter. Unlike the probe above, this path deliberately
+# acts on Codex Desktop. It is guarded by two checks before typing anything:
+#   1. navigate to the exact adopted thread via codex://threads/<thread-id>
+#   2. require the expected thread title to be visible in that Codex window's
+#      accessibility tree.
+# Only after both checks pass does it focus the lower composer region, paste the
+# continuation text, and submit it. The caller must verify delivery by observing
+# a new Codex turn through the read-only App Server APIs.
+_POWERSHELL_DISPATCH = r'''
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class CodexPetWin32 {
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+}
+"@
+
+$threadId = [string]$env:CODEX_PET_THREAD_ID
+$threadTitle = [string]$env:CODEX_PET_THREAD_TITLE
+$message = [string]$env:CODEX_PET_MESSAGE
+if ([string]::IsNullOrWhiteSpace($threadId)) { throw 'Missing thread id' }
+if ([string]::IsNullOrWhiteSpace($threadTitle)) { throw 'Missing thread title; automatic Desktop dispatch requires a verified title' }
+if ([string]::IsNullOrWhiteSpace($message)) { throw 'Missing continuation message' }
+
+Start-Process ("codex://threads/" + $threadId)
+Start-Sleep -Milliseconds 1600
+
+$deadline = [DateTime]::UtcNow.AddSeconds(12)
+$targetProcess = $null
+$targetRoot = $null
+$titleMatched = $false
+while ([DateTime]::UtcNow -lt $deadline -and -not $titleMatched) {
+    $processes = Get-Process | Where-Object {
+        $_.MainWindowHandle -ne 0 -and (
+            $_.ProcessName -match '^(Codex|ChatGPT)$' -or
+            $_.MainWindowTitle -match 'Codex|ChatGPT'
+        )
+    }
+    foreach ($p in $processes) {
+        try {
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
+            if ($null -eq $root) { continue }
+            $collection = $root.FindAll(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                [System.Windows.Automation.Condition]::TrueCondition
+            )
+            $limit = [Math]::Min($collection.Count, 1500)
+            for ($i = 0; $i -lt $limit; $i++) {
+                $e = $collection.Item($i)
+                try {
+                    $name = [string]$e.Current.Name
+                    if ($name -eq $threadTitle) {
+                        # An exact title can also appear in the left sidebar.
+                        # Only accept a match positioned like the active-thread
+                        # header: to the right of the navigation rail and near
+                        # the top of the window. This prevents typing into a
+                        # different thread merely because its sidebar row exists.
+                        $wr = $root.Current.BoundingRectangle
+                        $er = $e.Current.BoundingRectangle
+                        $windowWidth = [double]$wr.Width
+                        $windowHeight = [double]$wr.Height
+                        $centerX = [double]$er.Left + ([double]$er.Width / 2.0)
+                        $centerY = [double]$er.Top + ([double]$er.Height / 2.0)
+                        $headerMinX = [double]$wr.Left + ($windowWidth * 0.24)
+                        $headerMaxY = [double]$wr.Top + ($windowHeight * 0.28)
+                        if ($centerX -ge $headerMinX -and $centerY -le $headerMaxY) {
+                            $targetProcess = $p
+                            $targetRoot = $root
+                            $titleMatched = $true
+                            break
+                        }
+                    }
+                } catch {}
+            }
+            if ($titleMatched) { break }
+        } catch {}
+    }
+    if (-not $titleMatched) { Start-Sleep -Milliseconds 400 }
