@@ -593,3 +593,103 @@ class SupervisorUI:
         for index, prompt in enumerate(prompts, start=1):
             compact = " ".join(prompt.split())
             if len(compact) > 120:
+                compact = compact[:117] + "..."
+            self.preview_list.insert("end", f"{index}. {compact}")
+        self.preview_summary_var.set(
+            f"Preview: {len(prompts)} Goal{'s' if len(prompts) != 1 else ''}"
+            if prompts else "Preview: nothing to queue"
+        )
+        if prompts:
+            self.preview_list.selection_set(0, "end")
+
+    def _queue_selected_preview(self) -> None:
+        if not self._preview_prompts:
+            self._preview_goal_builder()
+        selected = list(self.preview_list.curselection())
+        prompts = [self._preview_prompts[i] for i in selected if i < len(self._preview_prompts)]
+        if not prompts:
+            messagebox.showinfo("Goal builder", "Select at least one preview line to queue.", parent=self.root)
+            return
+        self._queue_prompts(prompts)
+        self._preview_prompts = []
+        self.preview_list.delete(0, "end")
+        self.preview_summary_var.set("Preview: nothing yet")
+
+    def _queue_all_preview(self) -> None:
+        if not self._preview_prompts:
+            self._preview_goal_builder()
+        if not self._preview_prompts:
+            return
+        self._queue_prompts(list(self._preview_prompts))
+        self._preview_prompts = []
+        self.preview_list.delete(0, "end")
+        self.preview_summary_var.set("Preview: nothing yet")
+
+    def _get_timer_message(self) -> str:
+        return self.timer_message_entry.get("1.0", "end-1c").strip()
+
+    def _set_timer_message(self, message: str) -> None:
+        self.timer_message_entry.delete("1.0", "end")
+        self.timer_message_entry.insert("1.0", message)
+
+    def _save_timer_message(self) -> None:
+        message = self._get_timer_message()
+        if not message:
+            messagebox.showerror("Auto Continue Timer", "Enter a continuation message.", parent=self.root)
+            return
+        store = self._store()
+        try:
+            config = store.get_json("timer_config", {})
+            if not isinstance(config, dict):
+                config = {}
+            config["message"] = message
+            store.set_json("timer_config", config)
+        finally:
+            store.close()
+        self.status_var.set("Continuation message saved")
+        self._refresh_all()
+
+    def _arm_timer(self) -> None:
+        message = self._get_timer_message()
+        if not message:
+            messagebox.showerror("Auto Continue Timer", "Enter a continuation message.", parent=self.root)
+            return
+        store = self._store()
+        try:
+            decision = store.get_json("last_quota_decision", {})
+            waiting = isinstance(decision, dict) and decision.get("allowed") is False
+            config = {
+                "enabled": True,
+                "message": message,
+                "state": "waiting_reset" if waiting else "armed",
+                "wakeAt": decision.get("wakeAt") if waiting and isinstance(decision, dict) else None,
+                "lastError": None,
+                "armedAt": int(time.time()),
+            }
+            store.set_json("timer_config", config)
+        finally:
+            store.close()
+        self.timer_enabled_var.set(True)
+        if not (self.worker and self.worker.poll() is None):
+            self._start_worker()
+        self.status_var.set("Auto Continue Timer armed")
+        self._refresh_all()
+
+    def _disarm_timer(self) -> None:
+        store = self._store()
+        try:
+            config = store.get_json("timer_config", {})
+            if not isinstance(config, dict):
+                config = {}
+            config.update({"enabled": False, "state": "idle", "wakeAt": None})
+            store.set_json("timer_config", config)
+        finally:
+            store.close()
+        self.timer_enabled_var.set(False)
+        self.timer_state_var.set("Timer off")
+        self.status_var.set("Auto Continue Timer disarmed")
+
+    def _send_continue_now(self) -> None:
+        message = self._get_timer_message()
+        if not message:
+            messagebox.showerror("Auto Continue Timer", "Enter a continuation message.", parent=self.root)
