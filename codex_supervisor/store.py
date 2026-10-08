@@ -392,3 +392,103 @@ class Store:
         )
         self._conn.commit()
         return int(cur.rowcount)
+
+    def reset_passive_adopted_waiting_jobs(self) -> int:
+        """Migrate legacy WAITING_WRITER external jobs back to QUEUED.
+
+        v0.2.11 no longer acquires writer ownership for adopted tasks.
+        """
+        now = int(time.time())
+        cur = self._conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, goal_status = 'externalPending', last_error = NULL, updated_at = ?
+            WHERE status = ? AND thread_origin IN ('adopted', 'adopted_external')
+            """,
+            (JobStatus.QUEUED.value, now, JobStatus.WAITING_WRITER.value),
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
+
+    def mark_external_continue_sent(self, job_id: int) -> None:
+        job = self.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job: {job_id}")
+        if job.ownership is not ThreadOwnership.ADOPTED_EXTERNAL:
+            raise ValueError("Only externally owned adopted tasks use owner dispatch")
+        if job.status is not JobStatus.READY_OWNER:
+            raise ValueError("External task is not waiting for its owner")
+        self.update_job(
+            job_id,
+            status=JobStatus.EXTERNAL_ACTIVE,
+            goal_status="externalDispatched",
+            last_error=None,
+            external_dispatch_at=int(time.time()),
+            external_tracked_turn_id=None,
+            external_tracked_turn_status=None,
+        )
+
+    def mark_external_complete(self, job_id: int) -> None:
+        job = self.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job: {job_id}")
+        if job.ownership is not ThreadOwnership.ADOPTED_EXTERNAL:
+            raise ValueError("Only externally owned adopted tasks can be manually completed")
+        self.update_job(
+            job_id,
+            status=JobStatus.COMPLETE,
+            goal_status="externalComplete",
+            last_error=None,
+        )
+
+    def abandon_blocked_job(self, job_id: int) -> None:
+        job = self.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job: {job_id}")
+        if job.ownership is ThreadOwnership.ADOPTED_EXTERNAL:
+            raise ValueError("Detach adopted Desktop tasks with Remove Selected instead")
+        if job.status is not JobStatus.BLOCKED:
+            raise ValueError("Only blocked Pet-managed jobs can be abandoned")
+        self.update_job(
+            job_id,
+            status=JobStatus.FAILED,
+            goal_status="abandoned",
+            last_error=(
+                "Local Pet supervision was abandoned for this blocked managed thread. "
+                "The persisted Codex thread was left unchanged."
+            ),
+        )
+
+    def retry_blocked_job(self, job_id: int) -> None:
+        job = self.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job: {job_id}")
+        if job.ownership is ThreadOwnership.ADOPTED_EXTERNAL:
+            raise ValueError("Use owner dispatch for adopted Desktop tasks")
+        if job.status is not JobStatus.BLOCKED:
+            raise ValueError("Only blocked Pet-managed jobs can be retried")
+        self.update_job(
+            job_id,
+            status=JobStatus.QUEUED,
+            goal_status="retryRequested",
+            last_error=None,
+        )
+
+    def update_job(
+        self,
+        job_id: int,
+        *,
+        status: JobStatus | None = None,
+        thread_id: str | None | object = ...,
+        goal_status: str | None | object = ...,
+        last_error: str | None | object = ...,
+        cwd: str | object = ...,
+        thread_title: str | None | object = ...,
+        external_baseline_turn_id: str | None | object = ...,
+        external_tracked_turn_id: str | None | object = ...,
+        external_tracked_turn_status: str | None | object = ...,
+        external_dispatch_at: int | None | object = ...,
+    ) -> None:
+        fields: list[str] = []
+        values: list[Any] = []
+        if status is not None:
