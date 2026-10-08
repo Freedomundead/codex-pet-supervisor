@@ -497,3 +497,103 @@ Start-Sleep -Milliseconds 250
 if (-not (Test-ForegroundProcess $targetPid)) { throw 'Codex Desktop lost foreground ownership after the composer click. No message was sent.' }
 
 $oldClipboard = $null
+try { $oldClipboard = Get-Clipboard -Raw -ErrorAction SilentlyContinue } catch {}
+Set-Clipboard -Value $message
+[System.Windows.Forms.SendKeys]::SendWait('^v')
+Start-Sleep -Milliseconds 250
+if (-not (Test-ForegroundProcess $targetPid)) { throw 'Codex Desktop lost foreground ownership after paste. The message was not submitted.' }
+[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+Start-Sleep -Milliseconds 350
+if ($null -ne $oldClipboard) { try { Set-Clipboard -Value $oldClipboard } catch {} }
+
+[pscustomobject]@{
+    ok = $true
+    pid = $targetPid
+    processName = $targetProcess.ProcessName
+    windowTitle = $targetProcess.MainWindowTitle
+    hwnd = $targetHwndNumber
+    foregroundProcessVerified = $true
+    activationMethod = 'UnifiedStatusTarget+AttachThreadInput'
+    clickX = $x
+    clickY = $y
+} | ConvertTo-Json -Compress
+'''
+
+
+_POWERSHELL_DESKTOP_STATUS = r'''
+$ErrorActionPreference = 'Stop'
+if ($null -ne $PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
+$candidates = @()
+foreach ($p in (Get-Process | Where-Object { $_.MainWindowHandle -ne 0 })) {
+    if ($p.MainWindowTitle -eq 'Codex Pet Supervisor') { continue }
+    if ($p.ProcessName -match '^(python|pythonw|powershell|pwsh|WindowsTerminal|chrome|msedge|firefox)$') { continue }
+    $path = $null
+    try { $path = [string]$p.Path } catch {}
+    $trustedName = $p.ProcessName -match '^(Codex|ChatGPT|OpenAI\.Codex|OpenAI-Codex|OpenAICodex)$'
+    $trustedPath = (-not [string]::IsNullOrWhiteSpace($path)) -and (
+        $path -match '\\OpenAI\\Codex\\' -or
+        $path -match '\\WindowsApps\\OpenAI\.Codex_' -or
+        $path -match '\\WindowsApps\\OpenAI\.ChatGPT_'
+    )
+    if (-not ($trustedName -or $trustedPath)) { continue }
+    $score = 0
+    if ($p.ProcessName -match '^(Codex|OpenAI\.Codex|OpenAI-Codex|OpenAICodex)$') { $score += 10 }
+    if ($trustedPath) { $score += 20 }
+    $candidates += [pscustomobject]@{ pid=$p.Id; hwnd=[long]$p.MainWindowHandle; processName=$p.ProcessName; windowTitle=$p.MainWindowTitle; executable=$path; score=$score }
+}
+$best = $candidates | Sort-Object score -Descending | Select-Object -First 1
+if ($null -eq $best) {
+    [pscustomobject]@{ open=$false } | ConvertTo-Json -Compress
+} else {
+    [pscustomobject]@{ open=$true; pid=$best.pid; hwnd=$best.hwnd; processName=$best.processName; windowTitle=$best.windowTitle; executable=$best.executable } | ConvertTo-Json -Compress
+}
+'''
+
+
+
+def get_codex_desktop_status(*, timeout_seconds: int = 5) -> dict[str, Any]:
+    """Return a lightweight, read-only status for the visible Codex Desktop app."""
+    if os.name != "nt":
+        return {"open": False, "reason": "windows_only"}
+    exe = _powershell_executable()
+    try:
+        completed = subprocess.run(
+            [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _POWERSHELL_DESKTOP_STATUS],
+            check=False, capture_output=True, text=True, timeout=timeout_seconds,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {"open": False, "error": str(exc)}
+    if completed.returncode != 0:
+        return {"open": False, "error": _clean_process_output(completed.stderr or completed.stdout or "desktop status failed")}
+    try:
+        payload = json.loads(completed.stdout.strip())
+    except json.JSONDecodeError:
+        return {"open": False, "error": "invalid desktop status response"}
+    return payload if isinstance(payload, dict) else {"open": False}
+
+
+def dispatch_to_current_codex_desktop(
+    *,
+    message: str,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    """Send one message to the currently open Codex Desktop conversation.
+
+    Timer mode intentionally knows nothing about Codex thread ownership. It only
+    uses the visible Desktop composer after quota returns, like the user manually
+    coming back and pressing Continue. The desired task must already be selected
+    in Codex Desktop.
+    """
+    if os.name != "nt":
+        raise DesktopDispatchError("Codex Desktop timer dispatch is supported on Windows only")
+    if not message.strip():
+        raise DesktopDispatchError("Continuation message is required")
+    target = get_codex_desktop_status(timeout_seconds=min(5, timeout_seconds))
+    if not target.get("open"):
+        detail = target.get("error") or "Codex Desktop is not open"
+        raise DesktopDispatchError(f"Codex Desktop timer dispatch failed: {detail}")
+    pid = target.get("pid")
+    hwnd = target.get("hwnd")
+    if not isinstance(pid, int) or not isinstance(hwnd, int) or pid <= 0 or hwnd <= 0:
+        raise DesktopDispatchError("Codex Desktop detector did not return a usable PID/window handle")
