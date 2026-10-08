@@ -88,3 +88,93 @@ def test_external_owner_manual_dispatch_lifecycle(tmp_path):
         assert job.status is JobStatus.COMPLETE
         assert job.goal_status == "externalComplete"
     finally:
+        store.close()
+
+
+def test_legacy_adopted_writer_state_migrates_to_external_ownership(tmp_path):
+    db = tmp_path / "state.db"
+    store = Store(db)
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            prompt="continue",
+            cwd=str(tmp_path),
+        )
+        store._conn.execute(
+            "UPDATE jobs SET thread_origin = 'adopted', status = ?, goal_status = 'adoptedPending' WHERE id = ?",
+            (JobStatus.WAITING_WRITER.value, job_id),
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+
+    reopened = Store(db)
+    try:
+        job = reopened.get_job(job_id)
+        assert job is not None
+        assert job.thread_origin == "adopted_external"
+        assert job.ownership is ThreadOwnership.ADOPTED_EXTERNAL
+        assert job.status is JobStatus.QUEUED
+        assert job.goal_status == "externalPending"
+    finally:
+        reopened.close()
+
+
+def test_adopted_thread_title_and_external_tracking_persist(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            thread_title="Inspect Brain understanding",
+            prompt="continue",
+            cwd=str(tmp_path),
+        )
+        store.update_job(
+            job_id,
+            external_baseline_turn_id="turn-1",
+            external_tracked_turn_id="turn-2",
+            external_tracked_turn_status="inProgress",
+            external_dispatch_at=123,
+        )
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.thread_title == "Inspect Brain understanding"
+        assert job.external_baseline_turn_id == "turn-1"
+        assert job.external_tracked_turn_id == "turn-2"
+        assert job.external_tracked_turn_status == "inProgress"
+        assert job.external_dispatch_at == 123
+    finally:
+        store.close()
+
+
+def test_blocked_managed_job_can_be_retried_without_replacing_thread(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.add_job("finish task", str(tmp_path))
+        store.update_job(
+            job_id,
+            status=JobStatus.BLOCKED,
+            thread_id="thread-1",
+            goal_status="blocked",
+            last_error="needs approval",
+        )
+        store.retry_blocked_job(job_id)
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.QUEUED
+        assert job.thread_id == "thread-1"
+        assert job.goal_status == "retryRequested"
+        assert job.last_error is None
+    finally:
+        store.close()
+
+
+def test_abandon_blocked_managed_job_unblocks_queue_without_deleting_thread(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        first = store.add_job("too narrow", str(tmp_path))
+        second = store.add_job("next", str(tmp_path))
+        store.update_job(first, status=JobStatus.BLOCKED, thread_id="thread-1", goal_status="blocked")
+        assert store.current_job().id == first
+        store.abandon_blocked_job(first)
+        abandoned = store.get_job(first)
