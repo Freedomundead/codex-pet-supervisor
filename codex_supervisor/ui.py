@@ -1193,3 +1193,103 @@ class SupervisorUI:
     def _desktop_auto_dispatch_changed(self) -> None:
         store = self._store()
         try:
+            store.set_json("desktop_auto_dispatch", bool(self.desktop_auto_dispatch_var.get()))
+        finally:
+            store.close()
+        self.advanced_status_var.set(
+            "Desktop adopted-task dispatch enabled"
+            if self.desktop_auto_dispatch_var.get()
+            else "Desktop adopted-task dispatch disabled"
+        )
+
+    def _retry_selected(self) -> None:
+        job = self._selected_job()
+        if job is None:
+            return
+        if job.ownership is ThreadOwnership.ADOPTED_EXTERNAL:
+            # External tasks are re-armed for the Desktop owner without ever
+            # acquiring their writer lock.
+            store = self._store()
+            try:
+                store.update_job(
+                    job.id,
+                    status=JobStatus.QUEUED,
+                    goal_status="externalPending",
+                    last_error=None,
+                    external_tracked_turn_id=None,
+                    external_tracked_turn_status=None,
+                )
+            finally:
+                store.close()
+            self.status_var.set("Adopted Desktop task re-armed")
+            self._refresh_all()
+            return
+
+        store = self._store()
+        try:
+            try:
+                store.retry_blocked_job(job.id)
+            except ValueError as exc:
+                messagebox.showerror("Retry Selected", str(exc), parent=self.root)
+                return
+        finally:
+            store.close()
+        self.status_var.set("Managed task queued for retry")
+        self._refresh_all()
+
+    def _abandon_selected(self) -> None:
+        job = self._selected_job()
+        if job is None:
+            return
+        if job.ownership is ThreadOwnership.ADOPTED_EXTERNAL:
+            messagebox.showinfo(
+                "Abandon Selected",
+                "Adopted Desktop tasks can be detached with Remove Selected; the Desktop thread remains untouched.",
+                parent=self.root,
+            )
+            return
+        if not messagebox.askyesno(
+            "Abandon Selected",
+            "Stop supervising this blocked managed Goal so the queue can move on?\n\n"
+            "The persisted Codex thread will be left unchanged.",
+            parent=self.root,
+        ):
+            return
+        store = self._store()
+        try:
+            try:
+                store.abandon_blocked_job(job.id)
+            except ValueError as exc:
+                messagebox.showerror("Abandon Selected", str(exc), parent=self.root)
+                return
+        finally:
+            store.close()
+        self.status_var.set("Blocked managed task abandoned")
+        self._refresh_all()
+
+    def _edit_selected(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            return
+        job_id = int(selected[0])
+        store = self._store()
+        try:
+            job = store.get_job(job_id)
+            if job is None:
+                return
+            if job.thread_id and job.ownership is not ThreadOwnership.ADOPTED_EXTERNAL:
+                messagebox.showerror(
+                    "Edit Goal",
+                    "Cannot edit a Pet-managed Goal after its Codex thread has started.",
+                    parent=self.root,
+                )
+                return
+            projects = store.list_projects()
+            project_names = [item.name for item in projects]
+        finally:
+            store.close()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit queued Goal")
+        dialog.transient(self.root)
+        dialog.grab_set()
