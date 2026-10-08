@@ -793,3 +793,103 @@ class SupervisorUI:
         ttk.Label(body, text=name_label).grid(row=0, column=0, sticky="w")
         name_entry = ttk.Entry(body, textvariable=name_var, width=46)
         name_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(3, 10))
+
+        ttk.Label(body, text=folder_label).grid(row=2, column=0, sticky="w")
+        folder_entry = ttk.Entry(body, textvariable=folder_var, width=46)
+        folder_entry.grid(row=3, column=0, sticky="ew", pady=(3, 0))
+
+        def browse() -> None:
+            initial = folder_var.get().strip()
+            initialdir = initial if initial and Path(initial).is_dir() else browse_root
+            options = {"title": browse_title, "parent": dialog}
+            if initialdir and Path(initialdir).is_dir():
+                options["initialdir"] = str(initialdir)
+            selected = filedialog.askdirectory(**options)
+            if selected:
+                folder_var.set(str(Path(selected).resolve()))
+
+        ttk.Button(body, text="Browse…", command=browse).grid(row=3, column=1, padx=(8, 0), sticky="ew")
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
+
+        def accept() -> None:
+            name = name_var.get().strip()
+            folder_text = folder_var.get().strip()
+            if not name:
+                messagebox.showerror(title, "Name is required.", parent=dialog)
+                return
+            if not folder_text:
+                messagebox.showerror(title, "Select a folder.", parent=dialog)
+                return
+            folder = Path(folder_text).expanduser().resolve()
+            if not folder.is_dir():
+                messagebox.showerror(title, f"Folder does not exist:\n{folder}", parent=dialog)
+                return
+            result["value"] = (name, str(folder))
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right")
+        ttk.Button(buttons, text="OK", command=accept).pack(side="right", padx=(0, 8))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.bind("<Return>", lambda _e: accept())
+        name_entry.focus_set()
+        self.root.wait_window(dialog)
+        return result["value"]
+
+    def _set_project(self) -> None:
+        current_name = self.project_var.get().strip()
+        current_root = ""
+        store = self._store()
+        try:
+            existing = store.get_project(current_name) if current_name else None
+            if existing is not None:
+                current_root = existing.root
+        finally:
+            store.close()
+
+        selected = self._ask_named_folder(
+            title="Project",
+            name_label="Project name (example: My Project)",
+            folder_label="Project folder",
+            initial_name=current_name,
+            initial_folder=current_root,
+            browse_title="Select project folder",
+        )
+        if selected is None:
+            return
+        name, folder = selected
+
+        store = self._store()
+        try:
+            store.set_project(name, folder, make_default=True)
+        finally:
+            store.close()
+        self.project_var.set(name)
+        self._refresh_all()
+
+    def _set_scope(self) -> None:
+        project = self.project_var.get()
+        if not project:
+            messagebox.showerror("Scope", "Set a project first.", parent=self.root)
+            return
+
+        store = self._store()
+        try:
+            project_obj = store.get_project(project)
+            assert project_obj is not None
+            root = Path(project_obj.root).resolve()
+            current_name = self.scope_var.get().strip()
+            existing = store.get_scope(project, current_name) if current_name else None
+            current_folder = str((root / existing.relative_path).resolve()) if existing else str(root)
+        finally:
+            store.close()
+
+        selected = self._ask_named_folder(
+            title="Scope",
+            name_label="Scope name (example: Feature Area)",
+            folder_label="Folder inside the project",
+            initial_name=current_name,
+            initial_folder=current_folder,
