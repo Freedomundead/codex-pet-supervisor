@@ -493,3 +493,103 @@ class SupervisorUI:
         if isinstance(decision, dict):
             reason = decision.get("reason", "unknown")
             wake = decision.get("wakeAt")
+            wake_text = self._format_reset(wake) if isinstance(wake, int) else "—"
+            self.quota_summary_var.set(f"{reason} | next wake: {wake_text}")
+        else:
+            self.quota_summary_var.set("Quota snapshot not loaded yet")
+
+    def _render_window(self, label: ttk.Label, bar: ttk.Progressbar, window, name: str) -> None:
+        if window is None:
+            label.configure(text=f"{name}: —")
+            bar["value"] = 0
+            return
+        bar["value"] = window.remaining_percent
+        label.configure(
+            text=f"{name}: {window.remaining_percent}% left  |  reset {self._format_reset(window.resets_at)}"
+        )
+
+    @staticmethod
+    def _format_reset(value: int | None) -> str:
+        if not value:
+            return "—"
+        remaining = max(0, value - int(time.time()))
+        h, rem = divmod(remaining, 3600)
+        m, s = divmod(rem, 60)
+        clock = datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
+        return f"{clock} ({h:02d}:{m:02d}:{s:02d})"
+
+    def _update_target_path(self, store: Store) -> None:
+        project = self.project_var.get()
+        if not project:
+            self.target_path_var.set("Target: —")
+            return
+        scope = self.scope_var.get() or None
+        try:
+            target = store.resolve_target(project, scope)
+        except ValueError as exc:
+            self.target_path_var.set(f"Target unavailable: {exc}")
+            return
+        self.target_path_var.set(f"Target: {target}")
+
+    def _render_timer(self, config: dict) -> None:
+        enabled = bool(config.get("enabled"))
+        state = str(config.get("state") or ("armed" if enabled else "idle"))
+
+        if not enabled:
+            self.timer_state_title_var.set("OFF")
+            self.timer_state_var.set("Timer off")
+            self.timer_next_action_var.set("Arm the timer when you want the Pet to watch for a real usage-limit reset.")
+        elif state == "waiting_reset":
+            wake = config.get("wakeAt")
+            wake_text = self._format_reset(wake) if isinstance(wake, int) else "the next allowance reset"
+            self.timer_state_title_var.set("WAITING")
+            self.timer_state_var.set(f"Waiting for allowance reset: {wake_text}.")
+            self.timer_next_action_var.set("Do nothing. The Pet will re-check allowance at reset and send exactly once when it is available.")
+        elif state == "sent":
+            sent = config.get("lastSentAt")
+            sent_text = datetime.fromtimestamp(sent).strftime("%Y-%m-%d %H:%M:%S") if isinstance(sent, int) else "recently"
+            self.timer_state_title_var.set("SENT")
+            self.timer_state_var.set(f"Continue dispatched at {sent_text}.")
+            self.timer_next_action_var.set("Keep working normally. The Pet is watching for the next real usage-limit stop.")
+        elif state == "dispatch_failed":
+            self.timer_state_title_var.set("ATTENTION")
+            self.timer_state_var.set(f"Send failed: {config.get('lastError') or 'unknown Desktop error'}")
+            self.timer_next_action_var.set("Open the intended Codex chat and use Send Test Now. Re-arm only after the send path is healthy.")
+        else:
+            self.timer_state_title_var.set("ARMED")
+            self.timer_state_var.set("Armed. Quota is available; waiting until Codex actually hits a usage limit.")
+            self.timer_next_action_var.set("Use Codex normally. The Pet will stay idle until a real denied-allowance event appears.")
+
+        sent = config.get("lastSentAt")
+        last_error = config.get("lastError")
+        if last_error:
+            self.timer_last_event_var.set(f"Last dispatch error: {last_error}")
+        elif isinstance(sent, int):
+            self.timer_last_event_var.set(
+                "Last continuation sent: " + datetime.fromtimestamp(sent).strftime("%Y-%m-%d %H:%M:%S")
+            )
+        elif isinstance(config.get("armedAt"), int):
+            self.timer_last_event_var.set(
+                "Timer armed: " + datetime.fromtimestamp(config["armedAt"]).strftime("%Y-%m-%d %H:%M:%S")
+            )
+        else:
+            self.timer_last_event_var.set("No continuation has been sent yet.")
+
+    def _apply_timer_preset(self) -> None:
+        name = self.timer_preset_var.get()
+        message = TIMER_PRESETS.get(name)
+        if message is not None:
+            self._set_timer_message(message)
+            self.status_var.set(f"Preset loaded: {name} — save when ready")
+
+    def _preview_goal_builder(self) -> None:
+        text = self.prompt.get("1.0", "end").strip()
+        if self.queue_mode_var.get() == "lines":
+            prompts = split_sequence_lines(text)
+        else:
+            prompts = [text] if text else []
+        self._preview_prompts = prompts
+        self.preview_list.delete(0, "end")
+        for index, prompt in enumerate(prompts, start=1):
+            compact = " ".join(prompt.split())
+            if len(compact) > 120:
