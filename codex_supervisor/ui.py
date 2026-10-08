@@ -1493,3 +1493,83 @@ class SupervisorUI:
             return
         self.worker = subprocess.Popen(
             [sys.executable, "-m", "codex_supervisor", "--db", self.db_path, "run"],
+            text=True,
+        )
+        self.status_var.set("Pet starting…")
+        self._sync_worker_buttons()
+
+    def _stop_worker(self) -> None:
+        if self.worker and self.worker.poll() is None:
+            self.worker.terminate()
+            try:
+                self.worker.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                self.worker.kill()
+                self.worker.wait(timeout=2)
+        self.worker = None
+
+        # WAITING_QUOTA does not necessarily mean Codex started. If no native
+        # thread exists, stopping the supervisor returns that job to QUEUED so it
+        # can be edited/removed normally. Jobs with a real thread remain pinned.
+        store = self._store()
+        try:
+            store.reset_unstarted_waiting_jobs()
+            store.reset_passive_adopted_waiting_jobs()
+        finally:
+            store.close()
+
+        self.status_var.set("Pet idle")
+        self._refresh_all()
+
+    def _refresh_quota_async(self) -> None:
+        if self._quota_refreshing:
+            return
+        self._quota_refreshing = True
+        self.quota_summary_var.set("Refreshing quota…")
+        self.refresh_quota_button.configure(state="disabled")
+
+        def finish() -> None:
+            self._quota_refreshing = False
+            self.refresh_quota_button.configure(state="normal")
+            self._refresh_all()
+
+        def fail(message: str) -> None:
+            self._quota_refreshing = False
+            self.refresh_quota_button.configure(state="normal")
+            self.quota_summary_var.set("Quota refresh failed")
+            messagebox.showerror("Quota", message, parent=self.root)
+
+        def worker() -> None:
+            try:
+                payload = asyncio.run(self._read_quota())
+                decision = decide_availability(payload)
+                store = self._store()
+                try:
+                    store.set_json("rate_limits", payload)
+                    store.set_json(
+                        "last_quota_decision",
+                        {"allowed": decision.allowed, "reason": decision.reason, "wakeAt": decision.wake_at},
+                    )
+                finally:
+                    store.close()
+                self.root.after(0, finish)
+            except Exception as exc:  # UI boundary: show actionable error instead of crashing Tk.
+                self.root.after(0, lambda exc=exc: fail(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    async def _read_quota(self):
+        client = CodexAppServer()
+        await client.start()
+        try:
+            return await client.read_rate_limits()
+        finally:
+            await client.close()
+
+    def _on_close(self) -> None:
+        self._stop_worker()
+        self.root.destroy()
+
+
+def run_ui(db_path: str) -> None:
+    SupervisorUI(db_path).run()
