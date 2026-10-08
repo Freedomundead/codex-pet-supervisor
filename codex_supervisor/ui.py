@@ -1393,3 +1393,103 @@ class SupervisorUI:
                     lines = [
                         f"Codex windows found: {summary.windows}",
                         f"Accessibility elements captured: {summary.elements}",
+                        f"Likely thread/task controls: {len(summary.likely_thread_items)}",
+                        f"Likely composer controls: {len(summary.likely_composers)}",
+                        f"Likely Send controls: {len(summary.likely_send_controls)}",
+                        "",
+                        f"Report: {report}",
+                        "",
+                        "The probe was read-only; it did not click, type, focus, or send anything.",
+                    ]
+                    self.status_var.set("Desktop probe complete")
+                    messagebox.showinfo("Probe Desktop", "\n".join(lines), parent=self.root)
+
+                self.root.after(0, finish)
+            except Exception as exc:
+                def fail() -> None:
+                    self.status_var.set("Desktop probe failed")
+                    messagebox.showerror("Probe Desktop", str(exc), parent=self.root)
+                self.root.after(0, fail)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _copy_external_continue(self) -> None:
+        job = self._selected_job()
+        if job is None:
+            return
+        if job.ownership is not ThreadOwnership.ADOPTED_EXTERNAL:
+            messagebox.showinfo(
+                "Copy Continue",
+                "This control is only for externally owned adopted Codex tasks.",
+                parent=self.root,
+            )
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(job.prompt)
+        self.root.update_idletasks()
+        self.status_var.set("Continuation instruction copied to clipboard")
+
+    def _mark_external_sent(self) -> None:
+        job = self._selected_job()
+        if job is None:
+            return
+        store = self._store()
+        try:
+            try:
+                store.mark_external_continue_sent(job.id)
+            except ValueError as exc:
+                messagebox.showerror("Mark Continue Sent", str(exc), parent=self.root)
+                return
+        finally:
+            store.close()
+        self.status_var.set("Desktop owner marked as continuing")
+        self._refresh_all()
+
+    def _mark_external_complete(self) -> None:
+        job = self._selected_job()
+        if job is None:
+            return
+        if job.ownership is not ThreadOwnership.ADOPTED_EXTERNAL:
+            messagebox.showinfo(
+                "Mark Complete",
+                "Pet-managed Goals complete from their native Codex Goal status.",
+                parent=self.root,
+            )
+            return
+        if not messagebox.askyesno(
+            "Mark Complete",
+            "Mark this externally owned Codex task complete in the Pet queue?\n\n"
+            "This does not delete or modify the Codex Desktop thread.",
+            parent=self.root,
+        ):
+            return
+        store = self._store()
+        try:
+            store.mark_external_complete(job.id)
+        finally:
+            store.close()
+        self.status_var.set("External task marked complete")
+        self._refresh_all()
+
+    def _remove_selected(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            return
+        job_id = int(selected[0])
+        store = self._store()
+        try:
+            try:
+                removed = store.delete_job(job_id)
+            except ValueError as exc:
+                messagebox.showerror("Remove", str(exc), parent=self.root)
+                return
+        finally:
+            store.close()
+        if removed:
+            self._refresh_all()
+
+    def _start_worker(self) -> None:
+        if self.worker and self.worker.poll() is None:
+            return
+        self.worker = subprocess.Popen(
+            [sys.executable, "-m", "codex_supervisor", "--db", self.db_path, "run"],
