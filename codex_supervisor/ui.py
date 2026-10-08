@@ -398,3 +398,98 @@ class SupervisorUI:
                 timer_store = self._store()
                 try:
                     timer_config = timer_store.get_json("timer_config", {})
+                finally:
+                    timer_store.close()
+                timer_state = str(timer_config.get("state") or "") if isinstance(timer_config, dict) else ""
+                timer_enabled = bool(timer_config.get("enabled")) if isinstance(timer_config, dict) else False
+                if timer_enabled and timer_state == "waiting_reset":
+                    self.status_var.set("Pet waiting for Codex allowance reset")
+                elif timer_enabled and timer_state == "armed":
+                    self.status_var.set("Pet watching for the next usage limit")
+                elif timer_enabled and timer_state == "sent":
+                    self.status_var.set("Pet dispatched Continue; watching for the next limit")
+                elif timer_enabled and timer_state == "dispatch_failed":
+                    self.status_var.set("Pet could not send Continue — see Timer")
+                else:
+                    self.status_var.set("Pet running")
+        elif not light:
+            self.status_var.set("Pet idle")
+        self._sync_worker_buttons()
+
+    def _refresh_scopes(self, store: Store) -> None:
+        project = self.project_var.get()
+        scopes = store.list_scopes(project) if project else []
+        names = [""] + [s.name for s in scopes]
+        self.scope_combo["values"] = names
+        default_scope = store.default_scope_name(project) if project else None
+        current_scope = self.scope_var.get()
+        default_value = default_scope if default_scope in names else ""
+        if current_scope not in names or (not current_scope and default_value):
+            self.scope_var.set(default_value)
+        self._update_target_path(store)
+
+    def _refresh_jobs(self, store: Store) -> None:
+        selected = self.tree.selection()
+        selected_id = selected[0] if selected else None
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        current = store.current_job()
+        self._current_job_status = current.status if current else None
+        jobs = store.list_jobs()
+        runnable_statuses = {
+            JobStatus.QUEUED,
+            JobStatus.ACTIVE,
+            JobStatus.WAITING_QUOTA,
+            JobStatus.READY_OWNER,
+            JobStatus.EXTERNAL_ACTIVE,
+            JobStatus.WAITING_WRITER,
+            JobStatus.BLOCKED,
+        }
+        position_by_id: dict[int, int] = {}
+        position = 1
+        for job in jobs:
+            if job.status in runnable_statuses:
+                position_by_id[job.id] = position
+                position += 1
+        for job in jobs:
+            goal = job.prompt.replace("\n", " ").strip()
+            if len(goal) > 120:
+                goal = goal[:117] + "..."
+            display_position = position_by_id.get(job.id, "—")
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(job.id),
+                values=(display_position, job.status.value, store.job_target_label(job), goal),
+            )
+        if selected_id and self.tree.exists(selected_id):
+            self.tree.selection_set(selected_id)
+        active_count = len(position_by_id)
+        self.queue_summary_var.set(f"Queue: {active_count} active / queued  •  {len(jobs)} total")
+        if current:
+            current_position = position_by_id.get(current.id, "—")
+            detail = (
+                f"Position {current_position}  {current.status.value}  |  "
+                f"{store.job_target_label(current)}  |  {current.prompt[:180]}"
+            )
+            if current.last_error:
+                detail += f"\n{current.last_error}"
+            self.current_var.set(detail)
+        else:
+            self.current_var.set("No active or queued job")
+
+    def _render_quota(self, payload, decision) -> None:
+        windows = normalize_rate_limits(payload) if isinstance(payload, dict) else ()
+        five = next((w for w in windows if w.duration_mins == 300), None)
+        week = next((w for w in windows if w.duration_mins == 10080), None)
+        if five is not None:
+            remaining = int(five.remaining_percent)
+            if self._last_five_remaining is not None and remaining < self._last_five_remaining:
+                self._last_quota_change_at = time.time()
+            self._last_five_remaining = remaining
+            self._update_activity_label()
+        self._render_window(self.five_label, self.five_bar, five, "5-hour")
+        self._render_window(self.week_label, self.week_bar, week, "Weekly")
+        if isinstance(decision, dict):
+            reason = decision.get("reason", "unknown")
+            wake = decision.get("wakeAt")
