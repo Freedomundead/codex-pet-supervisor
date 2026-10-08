@@ -96,3 +96,103 @@ class Store:
             self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     # ---------- Projects / scopes ----------
+
+    def set_project(self, name: str, root: str, *, make_default: bool = False) -> None:
+        now = int(time.time())
+        self._conn.execute(
+            """
+            INSERT INTO projects(name, root, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET root = excluded.root, updated_at = excluded.updated_at
+            """,
+            (name, root, now),
+        )
+        self._conn.commit()
+        if make_default or self.default_project_name() is None:
+            self.set_default_project(name)
+
+    def get_project(self, name: str) -> Project | None:
+        row = self._conn.execute("SELECT * FROM projects WHERE name = ?", (name,)).fetchone()
+        return self._row_to_project(row) if row else None
+
+    def list_projects(self) -> list[Project]:
+        rows = self._conn.execute("SELECT * FROM projects ORDER BY name COLLATE NOCASE").fetchall()
+        return [self._row_to_project(row) for row in rows]
+
+    def set_default_project(self, name: str) -> None:
+        if self.get_project(name) is None:
+            raise ValueError(f"Unknown project: {name}")
+        self.set_json("default_project", name)
+
+    def default_project_name(self) -> str | None:
+        value = self.get_json("default_project")
+        return str(value) if isinstance(value, str) and value else None
+
+    def set_scope(self, project_name: str, name: str, relative_path: str, *, make_default: bool = False) -> None:
+        if self.get_project(project_name) is None:
+            raise ValueError(f"Unknown project: {project_name}")
+        now = int(time.time())
+        self._conn.execute(
+            """
+            INSERT INTO scopes(project_name, name, relative_path, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(project_name, name) DO UPDATE SET
+                relative_path = excluded.relative_path,
+                updated_at = excluded.updated_at
+            """,
+            (project_name, name, relative_path, now),
+        )
+        self._conn.commit()
+        key = f"default_scope:{project_name}"
+        if make_default or self.get_json(key) is None:
+            self.set_json(key, name)
+
+    def get_scope(self, project_name: str, name: str) -> Scope | None:
+        row = self._conn.execute(
+            "SELECT * FROM scopes WHERE project_name = ? AND name = ?",
+            (project_name, name),
+        ).fetchone()
+        return self._row_to_scope(row) if row else None
+
+    def list_scopes(self, project_name: str) -> list[Scope]:
+        rows = self._conn.execute(
+            "SELECT * FROM scopes WHERE project_name = ? ORDER BY name COLLATE NOCASE",
+            (project_name,),
+        ).fetchall()
+        return [self._row_to_scope(row) for row in rows]
+
+    def set_default_scope(self, project_name: str, name: str | None) -> None:
+        key = f"default_scope:{project_name}"
+        if name is None:
+            self.set_json(key, None)
+            return
+        if self.get_scope(project_name, name) is None:
+            raise ValueError(f"Unknown scope {name!r} for project {project_name!r}")
+        self.set_json(key, name)
+
+    def default_scope_name(self, project_name: str) -> str | None:
+        value = self.get_json(f"default_scope:{project_name}")
+        return str(value) if isinstance(value, str) and value else None
+
+    def resolve_target(self, project_name: str, scope_name: str | None = None) -> Path:
+        project = self.get_project(project_name)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_name}")
+        root = Path(project.root).expanduser().resolve()
+        if scope_name:
+            scope = self.get_scope(project_name, scope_name)
+            if scope is None:
+                raise ValueError(f"Unknown scope {scope_name!r} for project {project_name!r}")
+            target = (root / scope.relative_path).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(f"Scope {scope_name!r} escapes project root") from exc
+            return target
+        return root
+
+    # ---------- Jobs ----------
+
+    def add_job(
+        self,
+        prompt: str,
+        cwd: str = "",
+        *,
