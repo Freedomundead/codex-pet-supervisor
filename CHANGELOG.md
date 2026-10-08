@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added a non-invasive GitHub Releases update check in the UI.
+- Added **Check Updates / Open Release** without automatic downloading or installation.
+- Added `.github/CODEOWNERS` so Freedomundead is the default reviewer/owner for contributions.
+- Kept the frozen Timer lifecycle unchanged.
+
 ## 0.4.1 - Public beta
 
 - Prepared the project for public GitHub release.
