@@ -475,3 +475,102 @@ class Supervisor:
                 Path(path_value).expanduser().resolve().relative_to(root)
                 return True
             except (ValueError, OSError):
+                return False
+
+        def permission_path(entry: Any) -> tuple[str | None, str | None]:
+            """Return (path, access) for a v2 fileSystem entry when concrete."""
+            if not isinstance(entry, dict):
+                return None, None
+            access = str(entry.get("access") or "").lower() or None
+            raw_path = entry.get("path")
+            if isinstance(raw_path, str):
+                return raw_path, access
+            if isinstance(raw_path, dict):
+                kind = str(raw_path.get("type") or "").lower()
+                if kind in {"", "path"} and isinstance(raw_path.get("path"), str):
+                    return str(raw_path["path"]), access
+            return None, access
+
+        def validate_permission_profile(profile: Any) -> tuple[bool, str | None]:
+            if not isinstance(profile, dict):
+                return False, "Codex requested a malformed permission profile."
+
+            network = profile.get("network")
+            if isinstance(network, dict) and network.get("enabled") is True:
+                return False, "Codex requested network access. The Pet does not auto-approve network access."
+
+            fs = profile.get("fileSystem")
+            if fs is None:
+                return True, None
+            if not isinstance(fs, dict):
+                return False, "Codex requested a malformed filesystem permission profile."
+
+            for key, root in (("read", read_root), ("write", write_root)):
+                values = fs.get(key)
+                if values is None:
+                    continue
+                if not isinstance(values, list):
+                    return False, f"Codex requested malformed {key} permissions."
+                for value in values:
+                    if not isinstance(value, str) or not is_within(value, root):
+                        boundary = "project" if key == "read" else "selected Pet scope"
+                        return False, (
+                            f"Codex requested {key} access outside the allowed {boundary}. "
+                            f"Allowed root: {root}. Requested path: {value!r}."
+                        )
+
+            entries = fs.get("entries")
+            if entries is not None:
+                if not isinstance(entries, list):
+                    return False, "Codex requested malformed filesystem entries."
+                for entry in entries:
+                    path_value, access = permission_path(entry)
+                    if path_value is None:
+                        return False, (
+                            "Codex requested a non-concrete filesystem permission entry "
+                            "that the Pet cannot safely validate."
+                        )
+                    root = read_root if access == "read" else write_root
+                    if access not in {"read", "write"}:
+                        return False, f"Codex requested unsupported filesystem access mode: {access!r}."
+                    if not is_within(path_value, root):
+                        boundary = "project" if access == "read" else "selected Pet scope"
+                        return False, (
+                            f"Codex requested {access} access outside the allowed {boundary}. "
+                            f"Allowed root: {root}. Requested path: {path_value}."
+                        )
+            return True, None
+
+        if method == "item/fileChange/requestApproval":
+            grant_root = params.get("grantRoot")
+            if isinstance(grant_root, str) and grant_root:
+                requested = Path(grant_root).expanduser().resolve()
+                try:
+                    requested.relative_to(write_root)
+                except ValueError:
+                    reason = (
+                        f"Codex requested file-write access outside the selected Pet scope. "
+                        f"Selected scope: {write_root}. Requested root: {requested}. "
+                        "Choose a wider scope before running a Goal that must modify both locations."
+                    )
+                    block(reason)
+                    return {"decision": "decline"}
+            return {"decision": "accept"}
+
+        if method == "item/commandExecution/requestApproval":
+            if params.get("networkApprovalContext") or params.get("proposedNetworkPolicyAmendments"):
+                block("Codex requested network escalation. The Pet does not auto-approve network access.")
+                return {"decision": "decline"}
+            cwd = params.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                requested = Path(cwd).expanduser().resolve()
+                try:
+                    requested.relative_to(write_root)
+                except ValueError:
+                    reason = (
+                        f"Codex requested command execution outside the selected Pet scope. "
+                        f"Selected scope: {write_root}. Requested cwd: {requested}."
+                    )
+                    block(reason)
+                    return {"decision": "decline"}
+            additional_permissions = params.get("additionalPermissions")
