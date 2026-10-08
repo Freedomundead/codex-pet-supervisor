@@ -1,0 +1,12 @@
+# Freedomundead owns review responsibility for the public Pet.
+* @Freedomundead
+
+# Stable Timer core: changes here need deliberate owner review.
+/codex_supervisor/supervisor.py @Freedomundead
+/codex_supervisor/desktop_uia.py @Freedomundead
+/codex_supervisor/rate_limits.py @Freedomundead
+/codex_supervisor/app_server.py @Freedomundead
+
+# Supply-chain / repository automation.
+/.github/workflows/ @Freedomundead
+/pyproject.toml @Freedomundead
