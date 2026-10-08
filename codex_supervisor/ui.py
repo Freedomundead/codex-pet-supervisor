@@ -298,3 +298,103 @@ class SupervisorUI:
         self.tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(queue_frame, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=sb.set)
+
+    def run(self) -> None:
+        # Populate the allowance surface immediately. This metadata read does not
+        # spend a Codex work turn or consume the user's coding allowance.
+        self.root.after(250, self._refresh_quota_async)
+        self.root.after(350, self._refresh_desktop_status_async)
+        self.root.after(1500, self._tick)
+        self.root.after(5000, self._desktop_tick)
+        self.root.mainloop()
+
+    def _tick(self) -> None:
+        self._refresh_all(light=True)
+        self.root.after(2000, self._tick)
+
+    def _desktop_tick(self) -> None:
+        self._refresh_desktop_status_async()
+        self.root.after(5000, self._desktop_tick)
+
+    def _refresh_desktop_status_async(self) -> None:
+        if self._desktop_status_refreshing:
+            return
+        self._desktop_status_refreshing = True
+
+        def worker() -> None:
+            try:
+                from .desktop_uia import get_codex_desktop_status
+                result = get_codex_desktop_status()
+            except Exception as exc:
+                result = {"open": False, "error": str(exc)}
+
+            def apply() -> None:
+                self._desktop_status_refreshing = False
+                if result.get("open"):
+                    title = str(result.get("windowTitle") or "Codex")
+                    self.desktop_status_var.set(f"Codex Desktop: open  •  {title}")
+                elif result.get("error"):
+                    self.desktop_status_var.set("Codex Desktop: status unavailable")
+                else:
+                    self.desktop_status_var.set("Codex Desktop: not open")
+                self._update_activity_label()
+
+            self.root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_activity_label(self) -> None:
+        now = time.time()
+        if self._last_quota_change_at and now - self._last_quota_change_at <= 75:
+            self.desktop_activity_var.set("Activity: allowance changed recently — Codex is/was actively working")
+        else:
+            self.desktop_activity_var.set("Activity: no recent allowance change detected")
+
+    def _refresh_all(self, light: bool = False) -> None:
+        store = self._store()
+        try:
+            projects = store.list_projects()
+            names = [p.name for p in projects]
+            self.project_combo["values"] = names
+            default_project = store.default_project_name()
+            if self.project_var.get() not in names:
+                self.project_var.set(default_project or (names[0] if names else ""))
+            self.desktop_auto_dispatch_var.set(bool(store.get_json("desktop_auto_dispatch", True)))
+            timer_config = store.get_json("timer_config", {})
+            if not isinstance(timer_config, dict):
+                timer_config = {}
+            if not self._timer_loaded:
+                self.timer_enabled_var.set(bool(timer_config.get("enabled")))
+                message = timer_config.get("message")
+                if isinstance(message, str) and message.strip():
+                    self._set_timer_message(message)
+                self._timer_loaded = True
+            else:
+                self.timer_enabled_var.set(bool(timer_config.get("enabled")))
+            self._render_timer(timer_config)
+            self._refresh_scopes(store)
+            self._refresh_jobs(store)
+            self._render_quota(store.get_json("rate_limits"), store.get_json("last_quota_decision"))
+        finally:
+            store.close()
+        if self.worker and self.worker.poll() is not None:
+            self.status_var.set(f"Pet stopped (exit {self.worker.returncode})")
+            self.worker = None
+        elif self.worker:
+            if self._current_job_status is JobStatus.WAITING_QUOTA:
+                self.status_var.set("Pet waiting for quota")
+            elif self._current_job_status is JobStatus.READY_OWNER:
+                self.status_var.set("Pet ready for Codex Desktop owner")
+            elif self._current_job_status is JobStatus.EXTERNAL_ACTIVE:
+                self.status_var.set("Pet monitoring Desktop-owned task")
+            elif self._current_job_status is JobStatus.WAITING_WRITER:
+                self.status_var.set("Pet migrating legacy adopted task")
+            elif self._current_job_status is JobStatus.BLOCKED:
+                self.status_var.set("Pet blocked — see Current for reason")
+            elif self._current_job_status is JobStatus.FAILED:
+                self.status_var.set("Pet task failed — see Current for reason")
+            else:
+                timer_store = self._store()
+                try:
+                    timer_config = timer_store.get_json("timer_config", {})
