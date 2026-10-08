@@ -178,3 +178,93 @@ def test_external_owner_rearms_after_quota_cycle(tmp_path):
             prompt="continue",
             cwd=str(tmp_path),
         )
+        store.update_job(job_id, status=JobStatus.EXTERNAL_ACTIVE, goal_status="externalDispatched")
+        store.set_json("desktop_auto_dispatch", False)
+
+        exhausted = ExhaustedFake()
+        asyncio.run(Supervisor(store, exhausted, SupervisorConfig()).run_once())
+        assert store.get_job(job_id).status is JobStatus.WAITING_QUOTA
+
+        available = FakeAppServer()
+        asyncio.run(Supervisor(store, available, SupervisorConfig()).run_once())
+        job = store.get_job(job_id)
+        assert job.status is JobStatus.READY_OWNER
+        assert job.goal_status == "externalReady"
+        forbidden = {"resume_thread", "get_goal", "set_goal", "start_thread"}
+        assert forbidden.isdisjoint({name for name, _ in available.calls})
+    finally:
+        store.close()
+
+
+
+def test_external_owner_completion_is_detected_from_turn_status(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            thread_title="Inspect Brain understanding",
+            prompt="continue",
+            cwd=str(tmp_path),
+        )
+        store.set_json("desktop_auto_dispatch", False)
+        store.update_job(
+            job_id,
+            status=JobStatus.EXTERNAL_ACTIVE,
+            goal_status="externalDispatched",
+            external_baseline_turn_id="old-turn",
+            external_tracked_turn_id="new-turn",
+            external_tracked_turn_status="inProgress",
+        )
+        fake = FakeAppServer(latest_turn={"id": "new-turn", "status": "completed"})
+        asyncio.run(Supervisor(store, fake, SupervisorConfig()).run_once())
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.COMPLETE
+        assert job.goal_status == "externalComplete"
+        forbidden = {"resume_thread", "get_goal", "set_goal", "start_thread"}
+        assert forbidden.isdisjoint({name for name, _ in fake.calls})
+    finally:
+        store.close()
+
+
+def test_external_owner_in_progress_is_detected_without_dispatch(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        job_id = store.adopt_thread(
+            thread_id="existing-thread",
+            thread_title="Inspect Brain understanding",
+            prompt="continue",
+            cwd=str(tmp_path),
+        )
+        fake = FakeAppServer(latest_turn={"id": "turn-live", "status": "inProgress"})
+        asyncio.run(Supervisor(store, fake, SupervisorConfig()).run_once())
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job.status is JobStatus.EXTERNAL_ACTIVE
+        assert job.external_tracked_turn_id == "turn-live"
+        forbidden = {"resume_thread", "get_goal", "set_goal", "start_thread"}
+        assert forbidden.isdisjoint({name for name, _ in fake.calls})
+    finally:
+        store.close()
+
+
+def test_managed_command_and_file_approvals_inside_scope_are_accepted(tmp_path):
+    root = tmp_path / "project"
+    brain = root / "Brain"
+    brain.mkdir(parents=True)
+    store = Store(tmp_path / "state.db")
+    try:
+        store.set_project("SBC", str(root), make_default=True)
+        store.set_scope("SBC", "brain", "Brain", make_default=True)
+        job_id = store.add_job("edit Brain", project_name="SBC", scope_name="brain")
+        store.update_job(job_id, status=JobStatus.ACTIVE, thread_id="thread-1")
+        fake = FakeAppServer()
+        supervisor = Supervisor(store, fake, SupervisorConfig())
+
+        command = asyncio.run(supervisor._on_server_request(
+            "item/commandExecution/requestApproval",
+            {"threadId": "thread-1", "cwd": str(brain), "command": "python test.py"},
+        ))
+        file_change = asyncio.run(supervisor._on_server_request(
+            "item/fileChange/requestApproval",
+            {"threadId": "thread-1", "grantRoot": str(brain)},
