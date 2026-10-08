@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an improvement to Codex Pet Supervisor.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Timer
+        - UI/UX
+        - Windows integration
+        - Notifications / tray / startup
+        - Labs
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the workflow problem before proposing implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: core
+    attributes:
+      label: Core impact
+      options:
+        - label: I believe this requires changing the frozen Timer core.
