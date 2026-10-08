@@ -4,16 +4,23 @@ import hashlib
 from pathlib import Path
 
 
-FROZEN_V036 = {
-    "supervisor.py": "753c6a4b651874fa4c9f8eb0b7b1fb129e8070523a69252ec9f8bec770506978",
-    "desktop_uia.py": "1e56235d95a129968c642111d4c37c3085c7f0de0ac636480140fac93ba56a7f",
-    "rate_limits.py": "6a3933ce0a70318b33e9bfc3f3726051dae16c6d1d007b3e5b27ddc9fbbef185",
-    "app_server.py": "95b5ed6ce6b1ec93a576d12ab2a3575394b24bf47451d910831657bae82617d9",
+# Freeze the exact public beta core. Git's blob hash includes file length and
+# content, so comments/whitespace cannot change silently during UI-only work.
+FROZEN_PUBLIC_CORE = {
+    "supervisor.py": "e386bb69d4f037d405e3a42679acd291a023fe65",
+    "desktop_uia.py": "da801952d23c81c62cffe4a60ef50c2fb586c95a",
+    "rate_limits.py": "810b302c31c5e2c52aa69947a98b9721b19219fa",
+    "app_server.py": "c907f9482eb53e8d69fc29ec3d924bbb6c462578",
 }
 
 
-def test_working_v036_timer_core_is_frozen_during_ui_polish():
+def _git_blob_sha1(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode()
+    return hashlib.sha1(header + data).hexdigest()
+
+
+def test_working_timer_core_is_frozen_during_ui_polish():
     root = Path(__file__).parents[1] / "codex_supervisor"
-    for filename, expected in FROZEN_V036.items():
-        actual = hashlib.sha256((root / filename).read_bytes()).hexdigest()
+    for filename, expected in FROZEN_PUBLIC_CORE.items():
+        actual = _git_blob_sha1((root / filename).read_bytes())
         assert actual == expected, f"Frozen timer core changed: {filename}"
