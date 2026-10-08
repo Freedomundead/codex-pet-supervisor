@@ -296,3 +296,99 @@ class Store:
         if project_name is not None:
             if self.get_project(project_name) is None:
                 raise ValueError(f"Unknown project: {project_name}")
+            if scope_name is not None and self.get_scope(project_name, scope_name) is None:
+                raise ValueError(f"Unknown scope {scope_name!r} for project {project_name!r}")
+            target = self.resolve_target(project_name, scope_name)
+            if not target.is_dir():
+                raise ValueError(f"Target folder does not exist: {target}")
+        now = int(time.time())
+        status = job.status
+        if status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+            status = JobStatus.QUEUED
+        if job.ownership is ThreadOwnership.ADOPTED_EXTERNAL and job.thread_id:
+            self._conn.execute(
+                """
+                UPDATE jobs
+                SET prompt = ?, project_name = ?, scope_name = ?, status = ?,
+                    last_error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (prompt, project_name, scope_name, status.value, now, job_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE jobs
+                SET prompt = ?, project_name = ?, scope_name = ?, cwd = '', status = ?,
+                    last_error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (prompt, project_name, scope_name, status.value, now, job_id),
+            )
+        self._conn.commit()
+
+    def get_job(self, job_id: int) -> Job | None:
+        row = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def current_job(self) -> Job | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM jobs
+            WHERE status IN (?, ?, ?, ?, ?, ?, ?)
+            ORDER BY CASE status
+                WHEN ? THEN 0
+                WHEN ? THEN 1
+                WHEN ? THEN 2
+                WHEN ? THEN 3
+                WHEN ? THEN 4
+                WHEN ? THEN 5
+                ELSE 6
+            END, id
+            LIMIT 1
+            """,
+            (
+                JobStatus.ACTIVE.value,
+                JobStatus.EXTERNAL_ACTIVE.value,
+                JobStatus.WAITING_QUOTA.value,
+                JobStatus.READY_OWNER.value,
+                JobStatus.WAITING_WRITER.value,
+                JobStatus.BLOCKED.value,
+                JobStatus.QUEUED.value,
+                JobStatus.ACTIVE.value,
+                JobStatus.EXTERNAL_ACTIVE.value,
+                JobStatus.WAITING_QUOTA.value,
+                JobStatus.READY_OWNER.value,
+                JobStatus.WAITING_WRITER.value,
+                JobStatus.BLOCKED.value,
+            ),
+        ).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def list_jobs(self) -> list[Job]:
+        rows = self._conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+        return [self._row_to_job(row) for row in rows]
+
+    def delete_job(self, job_id: int) -> bool:
+        job = self.get_job(job_id)
+        if job is None:
+            return False
+        if job.thread_id and job.ownership is not ThreadOwnership.ADOPTED_EXTERNAL:
+            raise ValueError("Cannot remove a Pet-managed job that already has a Codex thread")
+        cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def reset_unstarted_waiting_jobs(self) -> int:
+        """Return quota-waiting jobs that never reached Codex to the queue."""
+        now = int(time.time())
+        cur = self._conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, updated_at = ?
+            WHERE status = ? AND thread_id IS NULL
+            """,
+            (JobStatus.QUEUED.value, now, JobStatus.WAITING_QUOTA.value),
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
