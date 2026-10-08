@@ -597,3 +597,32 @@ def dispatch_to_current_codex_desktop(
     hwnd = target.get("hwnd")
     if not isinstance(pid, int) or not isinstance(hwnd, int) or pid <= 0 or hwnd <= 0:
         raise DesktopDispatchError("Codex Desktop detector did not return a usable PID/window handle")
+
+    exe = _powershell_executable()
+    env = os.environ.copy()
+    env["CODEX_PET_MESSAGE"] = message
+    env["CODEX_PET_TARGET_PID"] = str(pid)
+    env["CODEX_PET_TARGET_HWND"] = str(hwnd)
+    try:
+        completed = subprocess.run(
+            [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _POWERSHELL_CURRENT_CHAT_DISPATCH],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DesktopDispatchError(f"Codex Desktop timer dispatch timed out after {timeout_seconds}s") from exc
+    if completed.returncode != 0:
+        detail = _clean_process_output(completed.stderr or completed.stdout or "unknown PowerShell error")
+        raise DesktopDispatchError(f"Codex Desktop timer dispatch failed: {detail}")
+    raw = completed.stdout.strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise DesktopDispatchError("Codex Desktop timer dispatch returned invalid JSON") from exc
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        raise DesktopDispatchError("Codex Desktop timer dispatch did not report success")
+    return payload
