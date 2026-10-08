@@ -1,10 +1,18 @@
 # 🐾 Codex Pet Supervisor
 
+[![tests](https://github.com/Freedomundead/codex-pet-supervisor/actions/workflows/tests.yml/badge.svg)](https://github.com/Freedomundead/codex-pet-supervisor/actions/workflows/tests.yml)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)
+![Windows](https://img.shields.io/badge/platform-Windows-blue)
+![MIT License](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.4.1-informational)
+
 > **Created by Freedomundead — my first vibe-coded open-source project.**
 
 A small Windows companion for **Codex Desktop** that solves one very specific problem: when a long Codex task stops because your usage allowance is exhausted, the Pet waits for the reset and sends **one saved continuation message** into the Codex chat you already have open.
 
 **Unofficial community project. Not affiliated with or endorsed by OpenAI.**
+
+> ⭐ If Codex Pet Supervisor saves you from babysitting the reset clock, starring the repository helps other Codex users find it.
 
 ## Screenshot
 
@@ -187,6 +195,16 @@ See:
 - [`ROADMAP.md`](ROADMAP.md)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
+
+## Help shape the Pet
+
+The first public contributor tasks are already open:
+
+- [#1 — Add Windows system tray mode for Timer workflow](https://github.com/Freedomundead/codex-pet-supervisor/issues/1)
+- [#2 — Add native Windows notifications for Timer lifecycle events](https://github.com/Freedomundead/codex-pet-supervisor/issues/2)
+- [#3 — Add optional Start with Windows support](https://github.com/Freedomundead/codex-pet-supervisor/issues/3)
+
+They are labeled **good first issue**, **help wanted**, and **enhancement** so new contributors have a clear place to start.
 
 ## Contributing
 
